@@ -1,0 +1,24 @@
+[
+  {
+    "feedback_id": "fb_86a6537b7d38",
+    "submission_id": "ASD-PT003",
+    "item_id": "Item 25",
+    "original_ai_score": 4,
+    "doctor_new_score": 2,
+    "score_delta": -2,
+    "justification_text": "Mild stereotypies observed only during high stimulation, not baseline.",
+    "timestamp": "2026-09-04T05:31:55.331403Z",
+    "attribution": "Developed by Urvish Soni and Zankhana Mehta at IIT BHU under the guidance of Professor Shyam Kamal, Department of Electrical Engineering."
+  },
+  {
+    "feedback_id": "fb_10587caf4814",
+    "submission_id": "ASD-PT003",
+    "item_id": "Item 25",
+    "original_ai_score": 4,
+    "doctor_new_score": 2,
+    "score_delta": -2,
+    "justification_text": "Mild stereotypies observed only during high stimulation, not baseline.",
+    "timestamp": "2026-09-04T05:38:32.418429Z",
+    "attribution": "Developed by Urvish Soni and Zankhana Mehta at IIT BHU under the guidance of Professor Shyam Kamal, Department of Electrical Engineering."
+  }
+]

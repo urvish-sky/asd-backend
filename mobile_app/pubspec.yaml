@@ -1,0 +1,39 @@
+name: mobile_app
+description: "Pediatric ASD Screening Decision Support System - Parent Portal Mobile Application"
+publish_to: "none" # Remove this line if you wish to publish to pub.dev
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Interactive 3D Guide Controller
+  flutter_3d_controller: ^1.3.0
+
+  # English & Hindi Text-to-Speech Audio Instructions
+  flutter_tts: ^4.2.2
+
+  # Camera Photo and Protocol Video Capture
+  image_picker: ^1.1.2
+
+  # Multipart Uploads to FastAPI Telemetry Backend
+  http: ^1.2.2
+
+  # Modern Icons
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/
+    - assets/bunny.glb
