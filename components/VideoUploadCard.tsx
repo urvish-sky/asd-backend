@@ -93,12 +93,12 @@ export default function VideoUploadCard({
         });
       }, 300);
 
-      // Timeout safeguard: abort fetch after 35 seconds to prevent indefinite stalling
+      // Timeout safeguard: abort fetch after 3 minutes (180,000 ms) to prevent indefinite stalling
       const controller = new AbortController();
       abortControllerRef.current = controller;
       const timeoutId = setTimeout(() => {
         controller.abort();
-      }, 35000);
+      }, 180000);
 
       const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
       const endpoint = `${API_BASE_URL.replace(/\/+$/, '')}/api/upload`;
@@ -159,7 +159,7 @@ export default function VideoUploadCard({
 
         // Jump progress to 100% on successful completion
         setProgress(100);
-        setStatusMessage('Telemetry & ISAA flags extracted successfully');
+        setStatusMessage(result.message || 'Telemetry & ISAA flags extracted successfully');
         setLocalAnalysis(result);
 
         setTimeout(() => {
@@ -182,7 +182,7 @@ export default function VideoUploadCard({
             : 'Failed to process video with backend CV pipeline';
 
         const displayErrorMessage = isTimeout
-          ? 'Upload timed out after 35 seconds. Please ensure the backend server is active and try again.'
+          ? 'Upload timed out after 3 minutes. Please ensure the backend server is active and try again.'
           : `Upload error: ${errorMessage}`;
 
         console.error('[VideoUploadCard] Upload/Analysis error caught:', err);

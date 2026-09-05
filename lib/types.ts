@@ -106,6 +106,8 @@ export interface ISAAFlags {
 }
 
 export interface VideoAnalysisResult {
+  status?: string;
+  message?: string;
   success: boolean;
   filename?: string;
   video_url?: string;

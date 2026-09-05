@@ -21,6 +21,7 @@ from analyzer import AutismBehaviorAnalyzer
 from db import (
     upload_video_stream_to_storage,
     insert_video_record,
+    update_video_record_analysis,
     get_clinical_inbox_data,
     save_screening_submission,
     calculate_age_in_months,
@@ -227,17 +228,81 @@ async def clinical_inbox():
 
 # ─── Video Upload & Analysis Endpoints ───────────────────────────────
 
+def process_video_with_mediapipe(video_url: str, screening_id: str):
+    """
+    Background worker task: executes MediaPipe Holistic / Computer Vision analysis
+    on the uploaded video and saves telemetry & ISAA flags to database.
+    """
+    logger.info(f"[BackgroundTask] Starting MediaPipe CV analysis for screening_id={screening_id}, video_url={video_url}")
+    target_path = None
+    is_downloaded = False
+
+    try:
+        raw_name = Path(video_url.split("?")[0]).name
+        local_temp = TEMP_DIR / raw_name
+        local_upload = UPLOAD_DIR / raw_name
+
+        if local_temp.exists():
+            target_path = local_temp
+        elif local_upload.exists():
+            target_path = local_upload
+        elif os.path.exists(video_url):
+            target_path = Path(video_url)
+        elif video_url.startswith("http://") or video_url.startswith("https://"):
+            import urllib.request
+            dl_path = TEMP_DIR / f"dl_{uuid.uuid4().hex[:6]}_{raw_name or 'video.mp4'}"
+            logger.info(f"[BackgroundTask] Downloading remote video {video_url} to {dl_path}")
+            urllib.request.urlretrieve(video_url, str(dl_path))
+            target_path = dl_path
+            is_downloaded = True
+
+        if not target_path or not target_path.exists():
+            logger.warning(f"[BackgroundTask] Video file could not be located for analysis: {video_url}")
+            return
+
+        logger.info(f"[BackgroundTask] Processing video frames with MediaPipe: {target_path}")
+        analysis_result = analyzer.analyze_video(str(target_path))
+        logger.info(
+            f"[BackgroundTask] MediaPipe CV analysis completed for {screening_id}: "
+            f"processed_frames={analysis_result.get('telemetry', {}).get('processed_frames')}, "
+            f"face_ratio={analysis_result.get('telemetry', {}).get('face_visibility_ratio')}"
+        )
+
+        # Update database with analysis result
+        update_video_record_analysis(
+            screening_id=screening_id,
+            cloud_storage_url=video_url,
+            analysis_result=analysis_result
+        )
+
+    except Exception as e:
+        logger.error(f"[BackgroundTask] Error during background MediaPipe analysis: {e}", exc_info=True)
+    finally:
+        # Clean up temporary downloaded file if created
+        if is_downloaded and target_path and target_path.exists():
+            try:
+                os.remove(target_path)
+            except Exception:
+                pass
+        # Clean up temp upload file if it exists in TEMP_DIR
+        elif target_path and target_path.parent == TEMP_DIR and target_path.exists():
+            try:
+                os.remove(target_path)
+            except Exception:
+                pass
+
 @app.post("/api/upload")
 async def upload_single_video(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     screening_id: Optional[str] = Form(None),
     protocol_number: Optional[int] = Form(1),
 ):
     """
     Dedicated video upload endpoint for clinical review.
-    Streams the video directly to Supabase Storage and inserts a record
-    into the videos table. Falls back to local storage when Supabase is
-    not configured.
+    Streams the video directly to Supabase Storage, inserts a record into the videos table,
+    and schedules MediaPipe CV analysis to run in the background.
+    Immediately returns a success response with processing status so the client does not wait.
     """
     try:
         if not file.filename:
@@ -251,28 +316,46 @@ async def upload_single_video(
         storage_result = await run_in_threadpool(
             upload_video_stream_to_storage, file_bytes, file.filename, content_type
         )
+        stored_filename = storage_result.get("filename", file.filename)
+        video_url = storage_result.get("video_url", "")
+        actual_screening_id = screening_id or f"SCR-UPLOAD-{uuid.uuid4().hex[:6]}"
 
         logger.info(
             f"Video uploaded via Supabase Storage: {file.filename} -> "
-            f"{storage_result.get('video_url')} (cloud={storage_result.get('cloud', False)})"
+            f"{video_url} (cloud={storage_result.get('cloud', False)})"
         )
+
+        # Cache a local copy in TEMP_DIR so background worker can analyze without re-downloading
+        temp_path = TEMP_DIR / stored_filename
+        try:
+            with open(temp_path, "wb") as tmp_f:
+                tmp_f.write(file_bytes)
+        except Exception as e:
+            logger.warning(f"Could not cache local copy in TEMP_DIR: {e}")
 
         # Insert a record into the videos table
         video_record = await run_in_threadpool(
             insert_video_record,
-            screening_id or f"SCR-UPLOAD-{uuid.uuid4().hex[:6]}",
+            actual_screening_id,
             protocol_number or 1,
-            storage_result.get("video_url", ""),
-            storage_result.get("filename"),
+            video_url,
+            stored_filename,
         )
 
+        # Schedule the MediaPipe CV analysis to run in the background
+        background_tasks.add_task(process_video_with_mediapipe, video_url, actual_screening_id)
+
+        # Immediately return success response with status "processing"
         return {
+            "status": "processing",
+            "message": "Video uploaded successfully and is being analyzed.",
             "success": True,
             "cloud": storage_result.get("cloud", False),
-            "filename": storage_result.get("filename"),
-            "video_url": storage_result.get("video_url"),
+            "filename": stored_filename,
+            "video_url": video_url,
             "relative_url": storage_result.get("relative_url"),
             "video_record_id": video_record.get("video_id"),
+            "screening_id": actual_screening_id,
             "telemetry": {
                 "face_visibility_ratio": 0.72,
                 "avg_wrist_velocity": 0.02,

@@ -283,6 +283,37 @@ def insert_video_record(
         **record,
     }
 
+def update_video_record_analysis(
+    screening_id: Optional[str] = None,
+    cloud_storage_url: Optional[str] = None,
+    analysis_result: Optional[Dict[str, Any]] = None,
+    video_id: Optional[str] = None,
+) -> bool:
+    """
+    Updates the analysis_result for a video record in Supabase PostgreSQL,
+    matching by video_id, cloud_storage_url, or screening_id.
+    """
+    if is_supabase_connected and supabase:
+        try:
+            query = supabase.table("videos").update({"analysis_result": analysis_result or {}})
+            if video_id:
+                query = query.eq("id", video_id)
+            elif cloud_storage_url:
+                query = query.eq("cloud_storage_url", cloud_storage_url)
+            elif screening_id:
+                query = query.eq("screening_id", screening_id)
+            else:
+                return False
+            query.execute()
+            logger.info(f"Updated video analysis in Supabase for screening_id={screening_id}, url={cloud_storage_url}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update video analysis in Supabase: {e}")
+            return False
+    else:
+        logger.info(f"[Fallback] Video analysis logged locally for screening_id={screening_id}")
+        return True
+
 # ─── Database Operations (Supabase PostgreSQL) ────────────────────────
 
 def get_clinical_inbox_data() -> Dict[str, Any]:
