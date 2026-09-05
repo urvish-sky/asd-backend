@@ -64,7 +64,7 @@ export default function CaseReviewClient({ id }: { id: string }) {
   const { patients, setPatients, updateClinicalNotes, updateReferral, signOffCase, updateClinicalStatus, updateISAAScore } = useAppStore();
 
   const storePatient = patients.find(
-    (p) => p.id === patientId || (p as any).screening_id === patientId || p.id?.toLowerCase() === patientId.toLowerCase()
+    (p) => p.id === patientId || p.screening_id === patientId || p.id?.toLowerCase() === patientId.toLowerCase()
   );
   const mockPatient = mockPatients.find((p) => p.id === patientId || p.id.toLowerCase() === patientId.toLowerCase());
 
@@ -96,7 +96,7 @@ export default function CaseReviewClient({ id }: { id: string }) {
               matched = data.patient;
             }
           }
-        } catch (e) {
+        } catch {
           // fallback to /api/inbox
         }
 
@@ -113,7 +113,7 @@ export default function CaseReviewClient({ id }: { id: string }) {
             matched = list.find(
               (p) =>
                 p.id === patientId ||
-                (p as any).screening_id === patientId ||
+                p.screening_id === patientId ||
                 p.id?.toLowerCase() === patientId.toLowerCase()
             ) || null;
           }
@@ -132,9 +132,10 @@ export default function CaseReviewClient({ id }: { id: string }) {
             setFetchError(`Patient record for ID "${patientId}" was not found in the database.`);
           }
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (!ignore && !storePatient && !mockPatient) {
-          setFetchError(err?.message || 'Failed to fetch patient data.');
+          const errorMessage = err instanceof Error ? err.message : 'Failed to fetch patient data.';
+          setFetchError(errorMessage);
         }
       } finally {
         if (!ignore) {
@@ -270,14 +271,16 @@ export default function CaseReviewClient({ id }: { id: string }) {
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
   const [toast, setToast] = useState<ToastData | null>(null);
 
-  // Sync clinical notes when patient loads dynamically
-  useEffect(() => {
-    if (patient?.clinicalNote) {
-      setNotes(patient.clinicalNote.notes || '');
-      setDiagnosticImpressions(patient.clinicalNote.diagnosticImpressions || '');
-      setSelectedReferral(patient.clinicalNote.referral || 'none');
-    }
-  }, [patient]);
+  // Sync clinical notes and overrides when patient loads dynamically or ID changes
+  // Uses the "adjusting state during rendering" pattern instead of useEffect
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevPatientId, setPrevPatientId] = useState<string | null>(patient?.id || null);
+  if (patient && patient.id !== prevPatientId) {
+    setPrevPatientId(patient.id);
+    setNotes(patient.clinicalNote?.notes || '');
+    setDiagnosticImpressions(patient.clinicalNote?.diagnosticImpressions || '');
+    setSelectedReferral(patient.clinicalNote?.referral || 'none');
+  }
 
   // ─── HITL Continuous Learning Overrides State ───────────────────────
   const [overrides, setOverrides] = useState<Record<number, ScoreOverrideItem>>(() => {

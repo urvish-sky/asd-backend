@@ -125,6 +125,7 @@ export interface VideoAnalysisResult {
 
 export interface Patient {
   id: string;
+  screening_id?: string;
   childName: string;
   dateOfBirth: string; // ISO date
   ageInMonths: number;
