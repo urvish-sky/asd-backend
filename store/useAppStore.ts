@@ -6,7 +6,7 @@ import { generateId } from '@/lib/mockData';
 
 interface AppState {
   patients: Patient[];
-  setPatients: (patients: Patient[]) => void;
+  setPatients: (patients: Patient[] | ((prev: Patient[]) => Patient[])) => void;
   addPatient: (patient: Omit<Patient, 'id' | 'submissionDate' | 'submissionStatus' | 'riskTier' | 'clinicalStatus' | 'biomarkers' | 'behavioralEvents' | 'clinicalNote' | 'isaaScores'> & { id?: string }) => string;
   updateSubmissionStatus: (id: string, status: SubmissionStatus) => void;
   updateClinicalStatus: (id: string, status: ClinicalStatus) => void;
@@ -21,7 +21,10 @@ interface AppState {
 export const useAppStore = create<AppState>((set, get) => ({
   patients: [],
 
-  setPatients: (patients) => set({ patients }),
+  setPatients: (patients) =>
+    set((state) => ({
+      patients: typeof patients === 'function' ? patients(state.patients) : patients,
+    })),
 
   addPatient: (patientData) => {
     const id = patientData.id || generateId();

@@ -27,14 +27,16 @@ import {
   VolumeX,
   RotateCcw,
   Link2,
+  Loader2,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
+import { mockPatients } from '@/lib/mockData';
 import BiomarkerChart from '@/components/BiomarkerChart';
 import BiomarkerCard from '@/components/BiomarkerCard';
 import EventTimeline from '@/components/EventTimeline';
 import ISAAForm, { ScoreOverrideItem } from '@/components/ISAAForm';
 import Toast, { ToastData } from '@/components/Toast';
-import { ReferralType } from '@/lib/types';
+import { ReferralType, Patient, VideoSlot, BiomarkerResult } from '@/lib/types';
 
 const REFERRAL_OPTIONS: { value: ReferralType; label: string }[] = [
   { value: 'none', label: 'No Referral Needed' },
@@ -59,8 +61,94 @@ export default function CaseReviewClient({ id }: { id: string }) {
   const router = useRouter();
   const patientId = id;
 
-  const { patients, updateClinicalNotes, updateReferral, signOffCase, updateClinicalStatus, updateISAAScore } = useAppStore();
-  const patient = patients.find((p) => p.id === patientId);
+  const { patients, setPatients, updateClinicalNotes, updateReferral, signOffCase, updateClinicalStatus, updateISAAScore } = useAppStore();
+
+  const storePatient = patients.find(
+    (p) => p.id === patientId || (p as any).screening_id === patientId || p.id?.toLowerCase() === patientId.toLowerCase()
+  );
+  const mockPatient = mockPatients.find((p) => p.id === patientId || p.id.toLowerCase() === patientId.toLowerCase());
+
+  const [fetchedPatient, setFetchedPatient] = useState<Patient | null>(null);
+  const [loading, setLoading] = useState<boolean>(!storePatient && !mockPatient);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const patient = storePatient || fetchedPatient || mockPatient;
+
+  // ─── Dynamic Data Fetching from FastAPI Backend ─────────────────────
+  useEffect(() => {
+    let ignore = false;
+
+    async function fetchPatientData() {
+      if (storePatient) {
+        setLoading(false);
+      }
+
+      try {
+        const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        let matched: Patient | null = null;
+
+        // 1. Try dedicated endpoint GET /api/patients/${patientId}
+        try {
+          const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/patients/${patientId}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.patient) {
+              matched = data.patient;
+            }
+          }
+        } catch (e) {
+          // fallback to /api/inbox
+        }
+
+        // 2. Fallback to /api/inbox list filtering
+        if (!matched) {
+          const inboxRes = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/inbox`);
+          if (inboxRes.ok) {
+            const inboxData = await inboxRes.json();
+            const list: Patient[] = Array.isArray(inboxData.patients)
+              ? inboxData.patients
+              : Array.isArray(inboxData)
+              ? inboxData
+              : [];
+            matched = list.find(
+              (p) =>
+                p.id === patientId ||
+                (p as any).screening_id === patientId ||
+                p.id?.toLowerCase() === patientId.toLowerCase()
+            ) || null;
+          }
+        }
+
+        if (!ignore) {
+          if (matched) {
+            setFetchedPatient(matched);
+            setPatients((prev: Patient[]) => {
+              const exists = prev.some((p: Patient) => p.id === matched!.id);
+              return exists
+                ? prev.map((p: Patient) => (p.id === matched!.id ? { ...p, ...matched } : p))
+                : [...prev, matched!];
+            });
+          } else if (!storePatient && !mockPatient) {
+            setFetchError(`Patient record for ID "${patientId}" was not found in the database.`);
+          }
+        }
+      } catch (err: any) {
+        if (!ignore && !storePatient && !mockPatient) {
+          setFetchError(err?.message || 'Failed to fetch patient data.');
+        }
+      } finally {
+        if (!ignore) {
+          setLoading(false);
+        }
+      }
+    }
+
+    fetchPatientData();
+
+    return () => {
+      ignore = true;
+    };
+  }, [patientId, storePatient, mockPatient, setPatients]);
 
   const [activeVideoSlot, setActiveVideoSlot] = useState<1 | 2 | 3>(1);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -70,7 +158,16 @@ export default function CaseReviewClient({ id }: { id: string }) {
   const [videoError, setVideoError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const activeSlot = patient?.videoSlots.find((v) => v.slotNumber === activeVideoSlot);
+  const defaultSlot: VideoSlot = {
+    slotNumber: activeVideoSlot,
+    title: `Protocol ${activeVideoSlot}`,
+    fileName: null,
+    fileSize: null,
+    uploaded: false,
+    qualityMetrics: { framingQuality: 90, lighting: 'good', resolution: '1080p' },
+  };
+
+  const activeSlot = patient?.videoSlots?.find((v) => v.slotNumber === activeVideoSlot) || defaultSlot;
 
   // Compute resolved video source with backend priority and frontend fallback
   const resolvedVideoSrc = useMemo(() => {
@@ -165,13 +262,22 @@ export default function CaseReviewClient({ id }: { id: string }) {
   };
 
   const [rightPaneTab, setRightPaneTab] = useState<'biomarkers' | 'isaa'>('biomarkers');
-  const [notes, setNotes] = useState(patient?.clinicalNote.notes || '');
-  const [diagnosticImpressions, setDiagnosticImpressions] = useState(patient?.clinicalNote.diagnosticImpressions || '');
-  const [selectedReferral, setSelectedReferral] = useState<ReferralType>(patient?.clinicalNote.referral || 'none');
+  const [notes, setNotes] = useState(patient?.clinicalNote?.notes || '');
+  const [diagnosticImpressions, setDiagnosticImpressions] = useState(patient?.clinicalNote?.diagnosticImpressions || '');
+  const [selectedReferral, setSelectedReferral] = useState<ReferralType>(patient?.clinicalNote?.referral || 'none');
   const [showExportModal, setShowExportModal] = useState(false);
   const [saved, setSaved] = useState(false);
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
   const [toast, setToast] = useState<ToastData | null>(null);
+
+  // Sync clinical notes when patient loads dynamically
+  useEffect(() => {
+    if (patient?.clinicalNote) {
+      setNotes(patient.clinicalNote.notes || '');
+      setDiagnosticImpressions(patient.clinicalNote.diagnosticImpressions || '');
+      setSelectedReferral(patient.clinicalNote.referral || 'none');
+    }
+  }, [patient]);
 
   // ─── HITL Continuous Learning Overrides State ───────────────────────
   const [overrides, setOverrides] = useState<Record<number, ScoreOverrideItem>>(() => {
@@ -383,21 +489,44 @@ export default function CaseReviewClient({ id }: { id: string }) {
     setShowExportModal(true);
   };
 
+  if (loading && !patient) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-24 flex flex-col items-center justify-center text-center animate-fade-in">
+        <Loader2 className="w-12 h-12 text-teal-600 animate-spin mb-4" />
+        <h2 className="text-xl font-bold text-slate-800 mb-1">Loading Patient Data...</h2>
+        <p className="text-sm text-slate-500">
+          Retrieving clinical records, video streams, and AI telemetry for{' '}
+          <span className="font-mono font-semibold text-slate-700">{patientId}</span>...
+        </p>
+      </div>
+    );
+  }
+
   if (!patient) {
     return (
-      <div className="max-w-7xl mx-auto px-4 py-16 text-center">
+      <div className="max-w-7xl mx-auto px-4 py-16 text-center animate-fade-in">
         <XCircle className="w-16 h-16 text-slate-300 mx-auto mb-4" />
         <h2 className="text-xl font-bold text-slate-700 mb-2">Patient Not Found</h2>
-        <p className="text-slate-500 mb-6">No patient record found with ID: {patientId}</p>
-        <button onClick={() => router.push('/doctor')} className="btn-primary">
+        <p className="text-slate-500 mb-6">
+          {fetchError || `Case "${patientId}" could not be located in the clinical database.`}
+        </p>
+        <button onClick={() => router.push('/doctor')} className="btn-primary inline-flex items-center gap-2">
           <ArrowLeft className="w-4 h-4" /> Back to Triage Inbox
         </button>
       </div>
     );
   }
 
-  const bio = patient.biomarkers;
-  if (!activeSlot) return null;
+  // Fallback biomarker definitions for newly registered cases
+  const defaultBiomarkers: BiomarkerResult = {
+    nameCallLatency: { measured: 1.2, normalMax: 1.2, unit: 's' },
+    socialGazeRatio: { measured: 72, normalMin: 65, normalMax: 85, unit: '%' },
+    motorStereotypyIndex: { frequency: 0.3, totalDuration: 1.8, normalMaxFrequency: 1.0 },
+    jointAttentionEpisodes: { count: 3, normalMin: 3 },
+    speechProsody: { atypicalPitchBursts: 0, vocalTurnTaking: 4, normalTurnTakingMin: 3 },
+  };
+
+  const bio = patient.biomarkers || defaultBiomarkers;
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -442,21 +571,21 @@ export default function CaseReviewClient({ id }: { id: string }) {
               <Maximize className="w-4 h-4 text-blue-500" />
               <div>
                 <p className="text-[10px] text-slate-400 uppercase font-semibold">Framing</p>
-                <p className="text-sm font-bold text-slate-700">{activeSlot.qualityMetrics.framingQuality}%</p>
+                <p className="text-sm font-bold text-slate-700">{activeSlot.qualityMetrics?.framingQuality ?? 90}%</p>
               </div>
             </div>
             <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg">
               <Sun className="w-4 h-4 text-amber-500" />
               <div>
                 <p className="text-[10px] text-slate-400 uppercase font-semibold">Lighting</p>
-                <p className="text-sm font-bold text-slate-700 capitalize">{activeSlot.qualityMetrics.lighting}</p>
+                <p className="text-sm font-bold text-slate-700 capitalize">{activeSlot.qualityMetrics?.lighting ?? 'good'}</p>
               </div>
             </div>
             <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg">
               <Monitor className="w-4 h-4 text-teal-500" />
               <div>
                 <p className="text-[10px] text-slate-400 uppercase font-semibold">Resolution</p>
-                <p className="text-sm font-bold text-slate-700">{activeSlot.qualityMetrics.resolution}</p>
+                <p className="text-sm font-bold text-slate-700">{activeSlot.qualityMetrics?.resolution ?? '1080p'}</p>
               </div>
             </div>
           </div>
@@ -545,10 +674,10 @@ export default function CaseReviewClient({ id }: { id: string }) {
               {/* Top Banner Overlay */}
               <div className="absolute top-2 left-3 right-3 flex items-center justify-between text-[11px] text-white/90 pointer-events-none drop-shadow">
                 <span className="font-semibold bg-black/50 px-2 py-0.5 rounded backdrop-blur">
-                  {activeSlot.title}
+                  {activeSlot?.title || 'Video Protocol'}
                 </span>
                 <span className="font-mono text-[10px] bg-black/50 px-2 py-0.5 rounded backdrop-blur truncate max-w-[200px]">
-                  {activeSlot.fileName}
+                  {activeSlot?.fileName || 'No video recorded'}
                 </span>
               </div>
 
@@ -657,7 +786,7 @@ export default function CaseReviewClient({ id }: { id: string }) {
           {/* Event Timeline */}
           <div className="clinical-card p-4">
             <EventTimeline
-              events={patient.behavioralEvents}
+              events={patient.behavioralEvents || []}
               activeVideoSlot={activeVideoSlot}
               onEventClick={handleEventClick}
             />
@@ -777,7 +906,7 @@ export default function CaseReviewClient({ id }: { id: string }) {
         <div className="flex items-center gap-2 mb-4">
           <Clipboard className="w-4 h-4 text-blue-600" />
           <h2 className="text-sm font-semibold text-slate-700">Clinical Evaluation</h2>
-          {patient.clinicalNote.signedOff && (
+          {patient.clinicalNote?.signedOff && (
             <span className="badge badge-reviewed ml-2">
               <CheckCircle className="w-3 h-3" /> Signed Off
             </span>

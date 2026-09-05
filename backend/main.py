@@ -294,6 +294,38 @@ async def clinical_inbox():
         logger.error(f"Error fetching inbox data: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load inbox: {str(e)}")
 
+@app.get("/api/patients/{patient_id}")
+async def get_patient_by_id(patient_id: str):
+    """
+    Retrieves full details and video telemetry for a specific patient by ID.
+    Searches Supabase or local fallback store.
+    """
+    try:
+        data = await run_in_threadpool(get_clinical_inbox_data)
+        patients_list = data.get("patients", [])
+        matched = next(
+            (
+                p for p in patients_list
+                if p.get("id") == patient_id
+                or p.get("screening_id") == patient_id
+                or (p.get("id") and p["id"].lower() == patient_id.lower())
+                or (p.get("screening_id") and p["screening_id"].lower() == patient_id.lower())
+            ),
+            None
+        )
+        if matched:
+            return JSONResponse(content={
+                "success": True,
+                "patient": matched,
+                "attribution": ATTRIBUTION_TEXT,
+            })
+        raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching patient {patient_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch patient: {str(e)}")
+
 # ─── Patient Registration & Screening Submission Endpoint ─────────────
 
 @app.post("/api/submit", status_code=201)

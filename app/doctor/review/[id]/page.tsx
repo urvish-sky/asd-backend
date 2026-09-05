@@ -1,6 +1,6 @@
-import CaseReviewClient from './CaseReviewClient';
+import CaseReviewClient from '../../case/[id]/CaseReviewClient';
 
-export default async function CaseReviewPage({
+export default async function DoctorReviewPage({
   params,
 }: {
   params: Promise<{ id: string }>;
