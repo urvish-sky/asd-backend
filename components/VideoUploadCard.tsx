@@ -30,6 +30,7 @@ interface VideoUploadCardProps {
   ) => void;
   isUploaded: boolean;
   analysisResult?: VideoAnalysisResult;
+  screeningId?: string | null;
 }
 
 export default function VideoUploadCard({
@@ -40,6 +41,7 @@ export default function VideoUploadCard({
   onUploadComplete,
   isUploaded,
   analysisResult,
+  screeningId,
 }: VideoUploadCardProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -107,9 +109,12 @@ export default function VideoUploadCard({
         const formData = new FormData();
         formData.append('file', file);
         formData.append('protocol_number', String(slotNumber));
+        if (screeningId) {
+          formData.append('screening_id', screeningId);
+        }
 
         console.log(
-          `[VideoUploadCard] Initiating upload of "${file.name}" (${(file.size / 1024 / 1024).toFixed(2)} MB) to: ${endpoint}`
+          `[VideoUploadCard] Initiating upload of "${file.name}" (${(file.size / 1024 / 1024).toFixed(2)} MB) to: ${endpoint} (screening_id: ${screeningId || 'auto'})`
         );
 
         // Send multipart/form-data request to FastAPI video upload endpoint
@@ -194,7 +199,7 @@ export default function VideoUploadCard({
         setError(displayErrorMessage);
       }
     },
-    [slotNumber, onUploadComplete]
+    [slotNumber, onUploadComplete, screeningId]
   );
 
   const handleDragOver = (e: React.DragEvent) => {

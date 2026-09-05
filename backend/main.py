@@ -115,6 +115,72 @@ class FeedbackPayload(BaseModel):
     doctor_new_score: int = Field(..., ge=1, le=5, example=2, description="Clinician overridden score (1-5)")
     justification_text: str = Field(..., min_length=3, example="Mild stereotypies observed only during high stimulation, not baseline.", description="Mandatory clinical justification for modification")
 
+# Pydantic Schema for Patient Screening Submission Payload
+class PatientSubmissionPayload(BaseModel):
+    # Supports both snake_case and camelCase attributes from frontend payloads
+    child_name: Optional[str] = Field(None, example="Aarav S.")
+    childName: Optional[str] = None
+    date_of_birth: Optional[str] = Field(None, example="2023-05-15")
+    dateOfBirth: Optional[str] = None
+    biological_sex: Optional[str] = Field(None, example="male")
+    biologicalSex: Optional[str] = None
+    parent_name: Optional[str] = Field(None, example="Priya Sharma")
+    parentName: Optional[str] = None
+    contact_email: Optional[str] = Field(None, example="priya.sharma@example.com")
+    contactEmail: Optional[str] = None
+    contact_phone: Optional[str] = Field(None, example="+91-98765-43210")
+    contactPhone: Optional[str] = None
+    risk_tier: Optional[str] = Field("typical", example="typical")
+    riskTier: Optional[str] = None
+    status: Optional[str] = Field("uploaded", example="uploaded")
+    video_records: Optional[List[Dict[str, Any]]] = None
+    telemetry: Optional[Dict[str, Any]] = None
+    isaa_flags: Optional[Dict[str, Any]] = None
+    patient_id: Optional[str] = None
+    patientId: Optional[str] = None
+    screening_id: Optional[str] = None
+    screeningId: Optional[str] = None
+
+    @property
+    def resolved_child_name(self) -> str:
+        return (self.child_name or self.childName or "Child Patient").strip()
+
+    @property
+    def resolved_dob(self) -> Optional[str]:
+        return self.date_of_birth or self.dateOfBirth or None
+
+    @property
+    def resolved_sex(self) -> str:
+        return (self.biological_sex or self.biologicalSex or "male").strip()
+
+    @property
+    def resolved_parent_name(self) -> str:
+        return (self.parent_name or self.parentName or "").strip()
+
+    @property
+    def resolved_email(self) -> str:
+        return (self.contact_email or self.contactEmail or "").strip()
+
+    @property
+    def resolved_phone(self) -> str:
+        return (self.contact_phone or self.contactPhone or "").strip()
+
+    @property
+    def resolved_risk_tier(self) -> str:
+        return (self.riskTier or self.risk_tier or "typical").strip()
+
+    @property
+    def resolved_status(self) -> str:
+        return (self.status or "uploaded").strip()
+
+    @property
+    def resolved_patient_id(self) -> Optional[str]:
+        return self.patient_id or self.patientId or None
+
+    @property
+    def resolved_screening_id(self) -> Optional[str]:
+        return self.screening_id or self.screeningId or None
+
 # Initialize MediaPipe behavior analyzer instance
 analyzer = AutismBehaviorAnalyzer()
 
@@ -126,6 +192,8 @@ def root():
         "status": "operational",
         "endpoints": {
             "inbox": "GET /api/inbox",
+            "submit": "POST /api/submit",
+            "upload": "POST /api/upload",
             "analyze": "POST /api/analyze",
             "feedback": "POST /api/feedback",
             "list_feedback": "GET /api/feedback",
@@ -225,6 +293,79 @@ async def clinical_inbox():
     except Exception as e:
         logger.error(f"Error fetching inbox data: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load inbox: {str(e)}")
+
+# ─── Patient Registration & Screening Submission Endpoint ─────────────
+
+@app.post("/api/submit", status_code=201)
+async def submit_patient_screening(payload: PatientSubmissionPayload):
+    """
+    Developed by Urvish Soni and Zankhana Mehta at IIT BHU under the guidance of Professor Shyam Kamal, Department of Electrical Engineering.
+
+    Accepts patient details (Child Name, Date of Birth/Age, Sex, Contact, etc.) from the registration form.
+    Executes save_screening_submission in a worker threadpool to persist the patient and screening records
+    into Supabase PostgreSQL (or fallback store).
+    Returns the generated screening_id and patient_id to the frontend so it can be passed to subsequent video uploads.
+    """
+    try:
+        child_name = payload.resolved_child_name
+        date_of_birth = payload.resolved_dob
+        biological_sex = payload.resolved_sex
+        parent_name = payload.resolved_parent_name
+        contact_email = payload.resolved_email
+        contact_phone = payload.resolved_phone
+        risk_tier = payload.resolved_risk_tier
+        status = payload.resolved_status
+        video_records = payload.video_records or []
+        telemetry = payload.telemetry or {}
+        isaa_flags = payload.isaa_flags or {}
+        patient_id = payload.resolved_patient_id
+        screening_id = payload.resolved_screening_id
+
+        submission_result = await run_in_threadpool(
+            save_screening_submission,
+            child_name=child_name,
+            date_of_birth=date_of_birth,
+            biological_sex=biological_sex,
+            parent_name=parent_name,
+            contact_email=contact_email,
+            contact_phone=contact_phone,
+            risk_tier=risk_tier,
+            status=status,
+            video_records=video_records,
+            telemetry=telemetry,
+            isaa_flags=isaa_flags,
+            patient_id=patient_id,
+            screening_id=screening_id,
+        )
+
+        logger.info(
+            f"Screening registered successfully: patient_id={submission_result.get('patient_id')}, "
+            f"screening_id={submission_result.get('screening_id')}, child_name={child_name}"
+        )
+
+        return JSONResponse(
+            status_code=201,
+            headers={
+                "X-Attribution": ATTRIBUTION_TEXT,
+                "Access-Control-Allow-Origin": "*"
+            },
+            content={
+                "status": "success",
+                "message": "Patient profile and screening record created successfully.",
+                "patient_id": submission_result.get("patient_id"),
+                "screening_id": submission_result.get("screening_id"),
+                "child_name": child_name,
+                "age_in_months": submission_result.get("age_in_months"),
+                "risk_tier": submission_result.get("risk_tier"),
+                "submission_status": submission_result.get("status"),
+                "attribution": ATTRIBUTION_TEXT,
+                **submission_result
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in /api/submit: {e}", exc_info=True)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Patient submission failed: {str(e)}")
 
 # ─── Video Upload & Analysis Endpoints ───────────────────────────────
 
@@ -418,6 +559,31 @@ async def analyze_video(
     temp_files_to_cleanup: List[Path] = []
 
     try:
+        # Pre-create/derive patient and screening records so video records link cleanly
+        resolved_name = child_name or "Child Patient"
+        calculated_dob = None
+        if age_months is not None and age_months > 0:
+            from datetime import timedelta
+            approx_days = int(age_months * 30.4375)
+            calculated_dob = (datetime.now() - timedelta(days=approx_days)).strftime("%Y-%m-%d")
+
+        initial_sub = await run_in_threadpool(
+            save_screening_submission,
+            child_name=resolved_name,
+            date_of_birth=calculated_dob,
+            biological_sex="male",
+            parent_name="Caregiver",
+            contact_email="",
+            contact_phone="",
+            risk_tier="typical",
+            status="analyzing",
+            video_records=[],
+            telemetry={},
+            isaa_flags={}
+        )
+        persisted_screening_id = initial_sub.get("screening_id", f"SCR-ANALYZE-{uuid.uuid4().hex[:6]}")
+        persisted_patient_id = initial_sub.get("patient_id")
+
         # If mobile app uploaded bundle with video1/2/3
         videos_to_process = []
         if file:
@@ -466,7 +632,7 @@ async def analyze_video(
             # Insert video record into Supabase videos table
             vid_record = await run_in_threadpool(
                 insert_video_record,
-                f"SCR-ANALYZE-{uuid.uuid4().hex[:6]}",
+                persisted_screening_id,
                 min(slot_idx, 3),
                 video_url,
                 stored_filename,
@@ -507,11 +673,31 @@ async def analyze_video(
         telemetry = primary_result.get("telemetry", {})
         isaa_flags = primary_result.get("isaa_flags", {})
 
+        # Update screening submission with final video records, telemetry, and ISAA flags
+        await run_in_threadpool(
+            save_screening_submission,
+            child_name=resolved_name,
+            date_of_birth=calculated_dob,
+            biological_sex="male",
+            parent_name="Caregiver",
+            contact_email="",
+            contact_phone="",
+            risk_tier="typical",
+            status="ai_complete",
+            video_records=saved_video_records,
+            telemetry=telemetry,
+            isaa_flags=isaa_flags,
+            patient_id=persisted_patient_id,
+            screening_id=persisted_screening_id,
+        )
+
         primary_video_url = saved_video_records[0]["video_url"] if saved_video_records else None
         relative_video_url = saved_video_records[0]["relative_url"] if saved_video_records else None
 
         response_payload = {
             "success": True,
+            "patient_id": persisted_patient_id,
+            "screening_id": persisted_screening_id,
             "filename": ", ".join(analyzed_filenames) if analyzed_filenames else (photo.filename if photo else "media_bundle"),
             "video_url": primary_video_url,
             "relative_url": relative_video_url,

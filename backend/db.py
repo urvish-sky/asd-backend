@@ -278,6 +278,21 @@ def insert_video_record(
     else:
         logger.info(f"[Fallback] Video record {video_id} logged locally (Supabase not connected).")
 
+    # Also update videoSlots in fallback_patients_store if matching record exists
+    for p in fallback_patients_store:
+        p_id = p.get("id", "")
+        p_scr = p.get("screening_id", "")
+        if p_id == screening_id or p_scr == screening_id or (p_id and p_id in screening_id) or (p_scr and p_scr in screening_id):
+            slots = p.get("videoSlots", [])
+            for s in slots:
+                if s.get("slotNumber") == protocol_number:
+                    s["uploaded"] = True
+                    s["fileName"] = file_name
+                    s["videoUrl"] = cloud_storage_url
+                    if analysis_result:
+                        s["analysisResult"] = analysis_result
+            break
+
     return {
         "video_id": video_id,
         **record,
@@ -312,7 +327,19 @@ def update_video_record_analysis(
             return False
     else:
         logger.info(f"[Fallback] Video analysis logged locally for screening_id={screening_id}")
-        return True
+
+    # Update in fallback_patients_store
+    for p in fallback_patients_store:
+        p_id = p.get("id", "")
+        p_scr = p.get("screening_id", "")
+        if (screening_id and (p_id == screening_id or p_scr == screening_id or p_id in screening_id or p_scr in screening_id)):
+            slots = p.get("videoSlots", [])
+            for s in slots:
+                if not cloud_storage_url or s.get("videoUrl") == cloud_storage_url:
+                    s["analysisResult"] = analysis_result
+            break
+
+    return True
 
 # ─── Database Operations (Supabase PostgreSQL) ────────────────────────
 
@@ -409,22 +436,28 @@ def get_clinical_inbox_data() -> Dict[str, Any]:
 
 def save_screening_submission(
     child_name: str,
-    date_of_birth: Optional[str],
-    biological_sex: str,
-    parent_name: str,
-    contact_email: str,
-    contact_phone: str,
-    risk_tier: str,
-    status: str,
-    video_records: List[Dict[str, Any]],
-    telemetry: Dict[str, Any],
-    isaa_flags: Dict[str, Any]
+    date_of_birth: Optional[str] = None,
+    biological_sex: str = "male",
+    parent_name: str = "",
+    contact_email: str = "",
+    contact_phone: str = "",
+    risk_tier: str = "typical",
+    status: str = "uploaded",
+    video_records: Optional[List[Dict[str, Any]]] = None,
+    telemetry: Optional[Dict[str, Any]] = None,
+    isaa_flags: Optional[Dict[str, Any]] = None,
+    patient_id: Optional[str] = None,
+    screening_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Persists patient, screening, and video records into Supabase PostgreSQL (or fallback store).
     """
-    patient_id = f"ASD-{uuid.uuid4().hex[:6].upper()}"
-    screening_id = f"SCR-{patient_id}"
+    video_records = video_records or []
+    telemetry = telemetry or {}
+    isaa_flags = isaa_flags or {}
+
+    actual_patient_id = patient_id or f"ASD-{uuid.uuid4().hex[:6].upper()}"
+    actual_screening_id = screening_id or f"SCR-{actual_patient_id}"
     now_iso = datetime.now().isoformat()
     calculated_age = calculate_age_in_months(date_of_birth)
 
@@ -432,7 +465,7 @@ def save_screening_submission(
         try:
             # 1. Upsert Patient
             supabase.table("patients").upsert({
-                "id": patient_id,
+                "id": actual_patient_id,
                 "name": child_name,
                 "date_of_birth": date_of_birth or date.today().isoformat(),
                 "biological_sex": biological_sex,
@@ -443,8 +476,8 @@ def save_screening_submission(
 
             # 2. Insert Screening
             supabase.table("screenings").insert({
-                "id": screening_id,
-                "patient_id": patient_id,
+                "id": actual_screening_id,
+                "patient_id": actual_patient_id,
                 "submission_date": now_iso,
                 "risk_tier": risk_tier,
                 "status": status,
@@ -456,14 +489,14 @@ def save_screening_submission(
             for i, vid in enumerate(video_records, start=1):
                 supabase.table("videos").insert({
                     "id": f"VID-{uuid.uuid4().hex[:8]}",
-                    "screening_id": screening_id,
+                    "screening_id": actual_screening_id,
                     "protocol_number": i if i <= 3 else 1,
                     "cloud_storage_url": vid.get("video_url", ""),
                     "file_name": vid.get("saved_filename") or vid.get("original_filename"),
                     "analysis_result": telemetry
                 }).execute()
 
-            logger.info(f"Successfully saved screening {screening_id} for patient {patient_id} to Supabase PostgreSQL.")
+            logger.info(f"Successfully saved screening {actual_screening_id} for patient {actual_patient_id} to Supabase PostgreSQL.")
         except Exception as e:
             logger.error(f"Failed to persist screening to Supabase: {e}")
 
@@ -482,7 +515,8 @@ def save_screening_submission(
         })
 
     new_patient_record = {
-        "id": patient_id,
+        "id": actual_patient_id,
+        "screening_id": actual_screening_id,
         "childName": child_name,
         "dateOfBirth": date_of_birth or date.today().isoformat(),
         "ageInMonths": calculated_age,
@@ -496,12 +530,27 @@ def save_screening_submission(
         "clinicalStatus": "pending",
         "videoSlots": slots
     }
-    fallback_patients_store.insert(0, new_patient_record)
+
+    # Check if a record with this ID already exists in fallback store to avoid duplication
+    existing_idx = next(
+        (idx for idx, p in enumerate(fallback_patients_store)
+         if p.get("id") == actual_patient_id or p.get("screening_id") == actual_screening_id),
+        None
+    )
+    if existing_idx is not None:
+        # Preserve any existing uploaded video slots
+        existing_slots = fallback_patients_store[existing_idx].get("videoSlots", [])
+        for i, s in enumerate(new_patient_record["videoSlots"]):
+            if i < len(existing_slots) and existing_slots[i].get("uploaded") and not s.get("uploaded"):
+                new_patient_record["videoSlots"][i] = existing_slots[i]
+        fallback_patients_store[existing_idx] = new_patient_record
+    else:
+        fallback_patients_store.insert(0, new_patient_record)
 
     return {
         "success": True,
-        "patient_id": patient_id,
-        "screening_id": screening_id,
+        "patient_id": actual_patient_id,
+        "screening_id": actual_screening_id,
         "age_in_months": calculated_age,
         "risk_tier": risk_tier,
         "status": status

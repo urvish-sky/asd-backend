@@ -149,6 +149,8 @@ export default function ParentPortal() {
   });
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [registeredPatientId, setRegisteredPatientId] = useState<string | null>(null);
+  const [screeningId, setScreeningId] = useState<string | null>(null);
+  const [isRegistering, setIsRegistering] = useState(false);
 
   // ─── Age Calculation Logic ───────────────────────────────────────
   const calculateMonths = (dob: string) => {
@@ -190,12 +192,55 @@ export default function ParentPortal() {
     return Object.keys(errors).length === 0;
   };
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     if (!validateForm()) return;
+    setIsRegistering(true);
 
     const ageInMonths = Math.max(0, calculateMonths(formData.dateOfBirth));
+    let backendPatientId: string | null = null;
+    let backendScreeningId: string | null = null;
 
-    const id = addPatient({
+    try {
+      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          child_name: formData.childName,
+          childName: formData.childName,
+          date_of_birth: formData.dateOfBirth,
+          dateOfBirth: formData.dateOfBirth,
+          biological_sex: formData.biologicalSex,
+          biologicalSex: formData.biologicalSex,
+          parent_name: formData.parentName,
+          parentName: formData.parentName,
+          contact_email: formData.contactEmail,
+          contactEmail: formData.contactEmail,
+          contact_phone: formData.contactPhone,
+          contactPhone: formData.contactPhone,
+          risk_tier: 'typical',
+          status: 'uploaded',
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.screening_id) {
+          backendScreeningId = data.screening_id;
+          setScreeningId(data.screening_id);
+        }
+        if (data.patient_id) {
+          backendPatientId = data.patient_id;
+        }
+      }
+    } catch (err) {
+      console.warn('Backend patient registration error (proceeding with local store):', err);
+    } finally {
+      setIsRegistering(false);
+    }
+
+    const assignedId = addPatient({
+      id: backendPatientId || undefined,
       childName: formData.childName,
       dateOfBirth: formData.dateOfBirth,
       ageInMonths,
@@ -210,7 +255,7 @@ export default function ParentPortal() {
       ] as [VideoSlot, VideoSlot, VideoSlot],
     });
 
-    setRegisteredPatientId(id);
+    setRegisteredPatientId(assignedId);
     setActiveSection('upload');
   };
 
@@ -237,6 +282,26 @@ export default function ParentPortal() {
     await new Promise((r) => setTimeout(r, 1200));
 
     applyAIAnalysis(registeredPatientId, Object.values(analysisResults));
+
+    // Also notify backend if screeningId exists
+    if (screeningId) {
+      try {
+        const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            patient_id: registeredPatientId,
+            screening_id: screeningId,
+            child_name: formData.childName,
+            status: 'ai_complete',
+            telemetry: analysisResults[1]?.telemetry || analysisResults[2]?.telemetry || analysisResults[3]?.telemetry || {},
+          }),
+        }).catch(() => null);
+      } catch (e) {
+        // ignore non-critical update failure
+      }
+    }
 
     setIsSubmitting(false);
     setSubmitted(true);
@@ -439,9 +504,18 @@ export default function ParentPortal() {
             </div>
 
             <div className="flex justify-end mt-8">
-              <button onClick={handleRegister} className="btn-primary">
-                Register & Continue to Video Upload
-                <ArrowRight className="w-4 h-4" />
+              <button onClick={handleRegister} className="btn-primary" disabled={isRegistering}>
+                {isRegistering ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Registering Profile...
+                  </>
+                ) : (
+                  <>
+                    Register & Continue to Video Upload
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -463,10 +537,47 @@ export default function ParentPortal() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
                     const dob = '2023-03-01';
                     const age = calculateMonths(dob);
+                    let qpPatientId: string | null = null;
+                    try {
+                      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                      const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          child_name: 'Samir V.',
+                          childName: 'Samir V.',
+                          date_of_birth: dob,
+                          dateOfBirth: dob,
+                          biological_sex: 'male',
+                          biologicalSex: 'male',
+                          parent_name: 'Pooja V.',
+                          parentName: 'Pooja V.',
+                          contact_email: 'pooja.v@example.com',
+                          contactEmail: 'pooja.v@example.com',
+                          contact_phone: '+91-98765-00000',
+                          contactPhone: '+91-98765-00000',
+                          risk_tier: 'moderate',
+                          status: 'uploaded',
+                        }),
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        if (data.screening_id) {
+                          setScreeningId(data.screening_id);
+                        }
+                        if (data.patient_id) {
+                          qpPatientId = data.patient_id;
+                        }
+                      }
+                    } catch (e) {
+                      console.warn('Quick profile backend submit error:', e);
+                    }
+
                     const id = addPatient({
+                      id: qpPatientId || undefined,
                       childName: 'Samir V.',
                       dateOfBirth: dob,
                       ageInMonths: age,
@@ -525,6 +636,7 @@ export default function ParentPortal() {
                 onUploadComplete={handleUploadComplete}
                 isUploaded={!!uploadedSlots[currentStep]}
                 analysisResult={analysisResults[currentStep]}
+                screeningId={screeningId || (registeredPatientId ? `SCR-${registeredPatientId}` : null)}
               />
 
               {/* Navigation */}
