@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   UserPlus,
   Video,
@@ -24,7 +24,11 @@ import dynamic from 'next/dynamic';
 import VideoUploadCard from '@/components/VideoUploadCard';
 import ParwaaRecommendationCard from '@/components/ParwaaRecommendationCard';
 import { useAppStore } from '@/store/useAppStore';
-import { BiologicalSex, VideoSlot, VideoAnalysisResult } from '@/lib/types';
+import { BiologicalSex, VideoSlot, VideoAnalysisResult, Patient } from '@/lib/types';
+import { mockPatients } from '@/lib/mockData';
+
+// Baseline hardcoded mock data profiles (Arjun M., Priya K., Rohan S.)
+const mockData: Patient[] = mockPatients;
 
 const ProtocolGuideViewer = dynamic(() => import('@/components/ProtocolGuideViewer'), {
   ssr: false,
@@ -85,6 +89,54 @@ const STATUS_LABELS: Record<string, { label: string; className: string; icon: Re
 export default function ParentPortal() {
   const { patients, addPatient, updateSubmissionStatus, applyAIAnalysis } = useAppStore();
   const [activeSection, setActiveSection] = useState<'register' | 'upload' | 'status'>('register');
+
+  // Baseline hardcoded mock data (Arjun M., Priya K., Rohan S.) initialized into state
+  const [records, setRecords] = useState<Patient[]>(mockData);
+
+  // ─── Fetch and Merge Live Data from Backend ────────────────────────
+  useEffect(() => {
+    let ignore = false;
+
+    async function fetchLiveSubmissions() {
+      try {
+        const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/inbox`);
+        if (res.ok) {
+          const data = await res.json();
+          const fetchedLiveData: Patient[] = Array.isArray(data.patients)
+            ? data.patients
+            : Array.isArray(data)
+            ? data
+            : [];
+          if (!ignore) {
+            // Keep 3 mock data profiles and append any new live database entries after them
+            const newLiveEntries = fetchedLiveData.filter(
+              (live) => !mockData.some((m) => m.id === live.id && m.childName === live.childName)
+            );
+            setRecords([...mockData, ...newLiveEntries]);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not fetch live submissions from backend:', err);
+      }
+    }
+
+    fetchLiveSubmissions();
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  // Sync any newly registered patient from client store into records
+  useEffect(() => {
+    if (patients.length > 0) {
+      setRecords((prev) => {
+        const newLocal = patients.filter((p) => !prev.some((r) => r.id === p.id));
+        return newLocal.length > 0 ? [...prev, ...newLocal] : prev;
+      });
+    }
+  }, [patients]);
 
   // ─── Registration Form State ──────────────────────────────────────
   const [formData, setFormData] = useState({
@@ -637,34 +689,38 @@ export default function ParentPortal() {
               <h3 className="text-sm font-semibold text-slate-700">All Submissions</h3>
             </div>
 
-            {patients.length === 0 ? (
+            {records.length === 0 ? (
               <div className="p-8 text-center text-slate-400">
                 <ClipboardCheck className="w-10 h-10 mx-auto mb-3 opacity-40" />
                 <p className="text-sm">No submissions yet. Register your child to get started.</p>
               </div>
             ) : (
               <div className="divide-y divide-slate-100">
-                {patients.map((patient) => {
-                  const statusInfo = STATUS_LABELS[patient.submissionStatus];
+                {records.map((record, index) => {
+                  const statusInfo = STATUS_LABELS[record.submissionStatus] || {
+                    label: 'Under Review',
+                    className: 'status-under_review',
+                    icon: <Eye className="w-3 h-3" />,
+                  };
                   return (
                     <div
-                      key={patient.id}
+                      key={`${record.id}-${index}`}
                       className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors"
                     >
                       <div className="flex items-center gap-4">
                         <div className="flex items-center justify-center w-9 h-9 rounded-full bg-slate-100 text-slate-500 text-xs font-bold">
-                          {patient.childName.charAt(0)}
+                          {record.childName.charAt(0)}
                         </div>
                         <div>
-                          <p className="text-sm font-semibold text-slate-800">{patient.childName}</p>
+                          <p className="text-sm font-semibold text-slate-800">{record.childName}</p>
                           <p className="text-xs text-slate-500">
-                            {patient.ageInMonths} months • ID: {patient.id}
+                            {record.ageInMonths} months • ID: {record.id}
                           </p>
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
                         <span className="text-xs text-slate-400 hidden sm:inline">
-                          {new Date(patient.submissionDate).toLocaleDateString()}
+                          {record.submissionDate ? new Date(record.submissionDate).toLocaleDateString() : 'N/A'}
                         </span>
                         <span className={`badge ${statusInfo.className} flex items-center gap-1`}>
                           {statusInfo.icon} {statusInfo.label}

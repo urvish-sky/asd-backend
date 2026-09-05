@@ -17,7 +17,11 @@ import {
   Database,
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
-import { RiskTier, ClinicalStatus } from '@/lib/types';
+import { Patient, RiskTier, ClinicalStatus } from '@/lib/types';
+import { mockPatients } from '@/lib/mockData';
+
+// Hardcoded baseline mock data profiles (Arjun M., Priya K., Rohan S.)
+const mockData: Patient[] = mockPatients;
 
 /**
  * Accurately calculates child age from Date of Birth string (ISO YYYY-MM-DD or ISO timestamp).
@@ -94,9 +98,11 @@ function getClinicalStatusBadge(status?: string): { label: string; className: st
 }
 
 export default function DoctorPortal() {
-  const { patients, setPatients } = useAppStore();
+  const { setPatients } = useAppStore();
   const router = useRouter();
 
+  // Baseline hardcoded mock data (Arjun M., Priya K., Rohan S.) initialized into state
+  const [records, setRecords] = useState<Patient[]>(mockData);
   const [searchQuery, setSearchQuery] = useState('');
   const [riskFilter, setRiskFilter] = useState<RiskTier | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<ClinicalStatus | 'all'>('all');
@@ -120,18 +126,26 @@ export default function DoctorPortal() {
         }
         const data = await res.json();
         if (!ignore) {
-          const patientList = Array.isArray(data.patients)
+          const fetchedLiveData: Patient[] = Array.isArray(data.patients)
             ? data.patients
             : Array.isArray(data)
             ? data
             : [];
-          setPatients(patientList);
+
+          // Keep 3 mock data profiles and append any new live database entries after them
+          const newLiveEntries = fetchedLiveData.filter(
+            (live) => !mockData.some((m) => m.id === live.id && m.childName === live.childName)
+          );
+          const combined = [...mockData, ...newLiveEntries];
+          setRecords(combined);
+          setPatients(combined);
           setDataSource(data.source === 'supabase_postgresql' ? 'live' : 'cache');
         }
       } catch (err: any) {
         if (!ignore) {
-          console.warn('Could not fetch from /api/inbox; preserving current state:', err);
+          console.warn('Could not fetch from /api/inbox; preserving mock data state:', err);
           setError(err?.message || 'Failed to connect to FastAPI backend.');
+          setRecords(mockData);
           setDataSource('cache');
         }
       } finally {
@@ -157,16 +171,22 @@ export default function DoctorPortal() {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
       const data = await res.json();
-      const patientList = Array.isArray(data.patients)
+      const fetchedLiveData: Patient[] = Array.isArray(data.patients)
         ? data.patients
         : Array.isArray(data)
         ? data
         : [];
-      setPatients(patientList);
+      const newLiveEntries = fetchedLiveData.filter(
+        (live) => !mockData.some((m) => m.id === live.id && m.childName === live.childName)
+      );
+      const combined = [...mockData, ...newLiveEntries];
+      setRecords(combined);
+      setPatients(combined);
       setDataSource(data.source === 'supabase_postgresql' ? 'live' : 'cache');
     } catch (err: any) {
       console.warn('Could not refresh /api/inbox:', err);
       setError(err?.message || 'Failed to connect to FastAPI backend.');
+      setRecords(mockData);
       setDataSource('cache');
     } finally {
       setLoading(false);
@@ -174,7 +194,7 @@ export default function DoctorPortal() {
   }, [API_BASE_URL, setPatients]);
 
   const filteredPatients = useMemo(() => {
-    return patients.filter((p) => {
+    return records.filter((p) => {
       const matchesSearch =
         p.childName.toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.id.toLowerCase().includes(searchQuery.toLowerCase());
@@ -182,13 +202,13 @@ export default function DoctorPortal() {
       const matchesStatus = statusFilter === 'all' || p.clinicalStatus === statusFilter;
       return matchesSearch && matchesRisk && matchesStatus;
     });
-  }, [patients, searchQuery, riskFilter, statusFilter]);
+  }, [records, searchQuery, riskFilter, statusFilter]);
 
-  // Dynamically calculated statistics based on actual database array length and statuses
-  const totalPatients = patients.length;
-  const pendingCount = patients.filter((p) => p.clinicalStatus === 'pending' || (p as any).submissionStatus === 'under_review').length;
-  const elevatedCount = patients.filter((p) => p.riskTier === 'elevated').length;
-  const reviewedCount = patients.filter((p) => p.clinicalStatus === 'reviewed').length;
+  // Dynamically calculated statistics based on actual records array length and statuses
+  const totalPatients = records.length;
+  const pendingCount = records.filter((p) => p.clinicalStatus === 'pending' || (p as any).submissionStatus === 'under_review').length;
+  const elevatedCount = records.filter((p) => p.riskTier === 'elevated').length;
+  const reviewedCount = records.filter((p) => p.clinicalStatus === 'reviewed').length;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -325,7 +345,7 @@ export default function DoctorPortal() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {loading && patients.length === 0 ? (
+              {loading && records.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="px-5 py-12 text-center">
                     <RefreshCw className="w-7 h-7 text-teal-600 animate-spin mx-auto mb-3" />
@@ -338,20 +358,20 @@ export default function DoctorPortal() {
                   <td colSpan={7} className="px-5 py-12 text-center">
                     <Activity className="w-10 h-10 text-slate-300 mx-auto mb-3" />
                     <p className="text-sm font-medium text-slate-600">No patients match your filters</p>
-                    {patients.length === 0 && (
+                    {records.length === 0 && (
                       <p className="text-xs text-slate-400 mt-1">No patient records found in the database.</p>
                     )}
                   </td>
                 </tr>
               ) : (
-                filteredPatients.map((patient) => {
+                filteredPatients.map((patient, index) => {
                   const riskBadge = getRiskTierBadge(patient.riskTier);
                   const statusBadge = getClinicalStatusBadge(patient.clinicalStatus);
                   const formattedAge = formatAgeDisplay(patient.dateOfBirth, patient.ageInMonths);
 
                   return (
                     <tr
-                      key={patient.id}
+                      key={`${patient.id}-${index}`}
                       className="hover:bg-slate-50 transition-colors cursor-pointer group"
                       onClick={() => router.push(`/doctor/case/${patient.id}`)}
                     >
