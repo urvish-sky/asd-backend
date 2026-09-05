@@ -548,7 +548,7 @@ def list_available_videos():
     Returns absolute public cloud URLs for direct streaming.
     """
     files = []
-    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://your-project.supabase.co"
+    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://wtgllzeffkibxecgsbng.supabase.co"
 
     if is_supabase_connected and supabase:
         try:

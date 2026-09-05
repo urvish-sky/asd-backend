@@ -20,9 +20,11 @@ load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger("asd_cdss_db")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "") or "https://wtgllzeffkibxecgsbng.supabase.co").strip()
+SUPABASE_KEY = (os.getenv("SUPABASE_KEY", "") or os.getenv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "") or "sb_publishable_-zMN7SQyd3uoMr8QginKgw_-M0Ri27j").strip()
 STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "videos").strip()
+
+DEFAULT_SUPABASE_URL = "https://wtgllzeffkibxecgsbng.supabase.co"
 
 supabase = None
 is_supabase_connected = False
@@ -66,7 +68,7 @@ def calculate_age_in_months(dob_str: Optional[str]) -> int:
 # ─── In-Memory / Local Seed Data Fallback ─────────────────────────────
 
 def get_mock_video_url(filename: str) -> str:
-    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://your-project.supabase.co"
+    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else DEFAULT_SUPABASE_URL
     return f"{base_url}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}"
 
 INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
@@ -217,7 +219,7 @@ def upload_video_stream_to_storage(file_bytes: bytes, filename: str, content_typ
     storage_filename = f"{clean_name}_{uuid.uuid4().hex[:8]}{file_ext}"
     storage_path = storage_filename
 
-    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://your-project.supabase.co"
+    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else DEFAULT_SUPABASE_URL
     canonical_public_url = f"{base_url}/storage/v1/object/public/{STORAGE_BUCKET}/{storage_path}"
 
     if is_supabase_connected and supabase:
