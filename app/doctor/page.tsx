@@ -373,7 +373,7 @@ export default function DoctorPortal() {
                     <tr
                       key={`${patient.id}-${index}`}
                       className="hover:bg-slate-50 transition-colors cursor-pointer group"
-                      onClick={() => router.push(`/doctor/review/${patient.id}`)}
+                      onClick={() => router.push(`/doctor/case/${patient.id}`)}
                     >
                       <td className="px-5 py-4">
                         <span className="text-xs font-mono font-bold text-slate-600 bg-slate-100 px-2 py-1 rounded border border-slate-200">
