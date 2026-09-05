@@ -27,6 +27,8 @@ from db import (
     calculate_age_in_months,
     is_supabase_connected,
     STORAGE_BUCKET,
+    SUPABASE_URL,
+    supabase,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -413,12 +415,9 @@ def process_video_with_mediapipe(video_url: str, screening_id: str):
     try:
         raw_name = Path(video_url.split("?")[0]).name
         local_temp = TEMP_DIR / raw_name
-        local_upload = UPLOAD_DIR / raw_name
 
         if local_temp.exists():
             target_path = local_temp
-        elif local_upload.exists():
-            target_path = local_upload
         elif os.path.exists(video_url):
             target_path = Path(video_url)
         elif video_url.startswith("http://") or video_url.startswith("https://"):
@@ -451,18 +450,13 @@ def process_video_with_mediapipe(video_url: str, screening_id: str):
     except Exception as e:
         logger.error(f"[BackgroundTask] Error during background MediaPipe analysis: {e}", exc_info=True)
     finally:
-        # Clean up temporary downloaded file if created
-        if is_downloaded and target_path and target_path.exists():
+        # Clean up temporary video file after analysis completes
+        if target_path and target_path.exists() and (is_downloaded or target_path.parent == TEMP_DIR):
             try:
                 os.remove(target_path)
-            except Exception:
-                pass
-        # Clean up temp upload file if it exists in TEMP_DIR
-        elif target_path and target_path.parent == TEMP_DIR and target_path.exists():
-            try:
-                os.remove(target_path)
-            except Exception:
-                pass
+                logger.info(f"[BackgroundTask] Cleaned up temporary video file: {target_path}")
+            except Exception as clean_err:
+                logger.warning(f"[BackgroundTask] Could not remove temp file {target_path}: {clean_err}")
 
 @app.post("/api/upload")
 async def upload_single_video(
@@ -485,28 +479,29 @@ async def upload_single_video(
         file_bytes = await file.read()
         content_type = file.content_type or "video/mp4"
 
-        # Stream to Supabase Storage (falls back to local uploads/ automatically)
+        # Stream directly to Supabase Storage bucket ('videos')
         storage_result = await run_in_threadpool(
             upload_video_stream_to_storage, file_bytes, file.filename, content_type
         )
         stored_filename = storage_result.get("filename", file.filename)
+        # Absolute public Supabase URL (e.g. https://[ref].supabase.co/storage/v1/object/public/videos/filename.mp4)
         video_url = storage_result.get("video_url", "")
         actual_screening_id = screening_id or f"SCR-UPLOAD-{uuid.uuid4().hex[:6]}"
 
         logger.info(
-            f"Video uploaded via Supabase Storage: {file.filename} -> "
-            f"{video_url} (cloud={storage_result.get('cloud', False)})"
+            f"Video uploaded to Supabase Storage: {file.filename} -> "
+            f"{video_url} (cloud={storage_result.get('cloud', True)})"
         )
 
-        # Cache a local copy in TEMP_DIR so background worker can analyze without re-downloading
+        # Cache a temporary local copy in TEMP_DIR strictly for MediaPipe CV analysis (deleted right after)
         temp_path = TEMP_DIR / stored_filename
         try:
             with open(temp_path, "wb") as tmp_f:
                 tmp_f.write(file_bytes)
         except Exception as e:
-            logger.warning(f"Could not cache local copy in TEMP_DIR: {e}")
+            logger.warning(f"Could not cache temp copy in TEMP_DIR: {e}")
 
-        # Insert a record into the videos table
+        # Insert a record into the Supabase videos table with the absolute cloud URL
         video_record = await run_in_threadpool(
             insert_video_record,
             actual_screening_id,
@@ -515,18 +510,18 @@ async def upload_single_video(
             stored_filename,
         )
 
-        # Schedule the MediaPipe CV analysis to run in the background
+        # Schedule the MediaPipe CV analysis to run in the background (cleans up temp_path when done)
         background_tasks.add_task(process_video_with_mediapipe, video_url, actual_screening_id)
 
-        # Immediately return success response with status "processing"
+        # Immediately return success response with absolute public cloud URL
         return {
             "status": "processing",
-            "message": "Video uploaded successfully and is being analyzed.",
+            "message": "Video uploaded successfully to Supabase Storage and queued for analysis.",
             "success": True,
-            "cloud": storage_result.get("cloud", False),
+            "cloud": True,
             "filename": stored_filename,
             "video_url": video_url,
-            "relative_url": storage_result.get("relative_url"),
+            "relative_url": video_url,
             "video_record_id": video_record.get("video_id"),
             "screening_id": actual_screening_id,
             "telemetry": {
@@ -549,17 +544,40 @@ async def upload_single_video(
 @app.get("/api/videos")
 def list_available_videos():
     """
-    Lists all available video files in the uploads directory.
+    Lists available video files from Supabase Storage bucket ('videos') or local fallback.
+    Returns absolute public cloud URLs for direct streaming.
     """
     files = []
+    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://your-project.supabase.co"
+
+    if is_supabase_connected and supabase:
+        try:
+            storage_items = supabase.storage.from_(STORAGE_BUCKET).list()
+            for item in (storage_items or []):
+                name = item.get("name")
+                if name and Path(name).suffix.lower() in [".mp4", ".mov", ".webm", ".avi"]:
+                    cloud_url = f"{base_url}/storage/v1/object/public/{STORAGE_BUCKET}/{name}"
+                    files.append({
+                        "filename": name,
+                        "size_bytes": item.get("metadata", {}).get("size", 0),
+                        "video_url": cloud_url,
+                        "relative_url": cloud_url,
+                        "cloud": True
+                    })
+        except Exception as err:
+            logger.warning(f"Could not list videos from Supabase storage: {err}")
+
     for f in UPLOAD_DIR.glob("*"):
         if f.is_file() and f.suffix.lower() in [".mp4", ".mov", ".webm", ".avi"]:
-            files.append({
-                "filename": f.name,
-                "size_bytes": f.stat().st_size,
-                "video_url": f"http://localhost:8000/videos/{f.name}",
-                "relative_url": f"/videos/{f.name}"
-            })
+            if not any(x["filename"] == f.name for x in files):
+                cloud_url = f"{base_url}/storage/v1/object/public/{STORAGE_BUCKET}/{f.name}"
+                files.append({
+                    "filename": f.name,
+                    "size_bytes": f.stat().st_size,
+                    "video_url": cloud_url,
+                    "relative_url": cloud_url,
+                    "cloud": False
+                })
     return {
         "total_videos": len(files),
         "videos": files,
@@ -639,19 +657,20 @@ async def analyze_video(
             vid_bytes = await vid.read()
             vid_content_type = vid.content_type or "video/mp4"
 
-            # Stream to Supabase Storage (with local fallback)
+            # Stream directly to Supabase Storage bucket ('videos')
             storage_result = await run_in_threadpool(
                 upload_video_stream_to_storage, vid_bytes, vid.filename, vid_content_type
             )
             stored_filename = storage_result.get("filename", vid.filename)
+            # Absolute public Supabase URL (e.g. https://[ref].supabase.co/storage/v1/object/public/videos/filename.mp4)
             video_url = storage_result.get("video_url", "")
 
             logger.info(
-                f"Video streamed to storage: {vid.filename} -> {video_url} "
-                f"(cloud={storage_result.get('cloud', False)})"
+                f"Video streamed to Supabase Storage: {vid.filename} -> {video_url} "
+                f"(cloud={storage_result.get('cloud', True)})"
             )
 
-            # Write to temp directory for MediaPipe CV analysis, then clean up
+            # Write to temp directory strictly for MediaPipe CV analysis (cleaned up in finally block)
             temp_path = TEMP_DIR / stored_filename
             with open(temp_path, "wb") as tmp_f:
                 tmp_f.write(vid_bytes)
@@ -661,7 +680,7 @@ async def analyze_video(
             result = await run_in_threadpool(analyzer.analyze_video, str(temp_path))
             analyzed_filenames.append(vid.filename)
 
-            # Insert video record into Supabase videos table
+            # Insert video record into Supabase videos table with the absolute cloud URL
             vid_record = await run_in_threadpool(
                 insert_video_record,
                 persisted_screening_id,
@@ -676,8 +695,8 @@ async def analyze_video(
                 "original_filename": vid.filename,
                 "saved_filename": stored_filename,
                 "video_url": video_url,
-                "relative_url": storage_result.get("relative_url", f"/videos/{stored_filename}"),
-                "cloud": storage_result.get("cloud", False),
+                "relative_url": video_url,
+                "cloud": True,
                 "video_record_id": vid_record.get("video_id"),
             })
 
@@ -724,7 +743,6 @@ async def analyze_video(
         )
 
         primary_video_url = saved_video_records[0]["video_url"] if saved_video_records else None
-        relative_video_url = saved_video_records[0]["relative_url"] if saved_video_records else None
 
         response_payload = {
             "success": True,
@@ -732,7 +750,7 @@ async def analyze_video(
             "screening_id": persisted_screening_id,
             "filename": ", ".join(analyzed_filenames) if analyzed_filenames else (photo.filename if photo else "media_bundle"),
             "video_url": primary_video_url,
-            "relative_url": relative_video_url,
+            "relative_url": primary_video_url,
             "videos": saved_video_records,
             "attribution": ATTRIBUTION_TEXT,
             "telemetry": telemetry,

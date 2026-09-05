@@ -22,7 +22,7 @@ logger = logging.getLogger("asd_cdss_db")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
-STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "screening-videos").strip()
+STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "videos").strip()
 
 supabase = None
 is_supabase_connected = False
@@ -65,6 +65,10 @@ def calculate_age_in_months(dob_str: Optional[str]) -> int:
 
 # ─── In-Memory / Local Seed Data Fallback ─────────────────────────────
 
+def get_mock_video_url(filename: str) -> str:
+    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://your-project.supabase.co"
+    return f"{base_url}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}"
+
 INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
     {
         "id": "ASD-PT001",
@@ -86,7 +90,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "arjun_social_engagement.mp4",
                 "fileSize": 45200000,
                 "uploaded": True,
-                "videoUrl": "/videos/arjun_social_engagement.mp4",
+                "videoUrl": get_mock_video_url("arjun_social_engagement.mp4"),
                 "qualityMetrics": {"framingQuality": 94, "lighting": "good", "resolution": "1080p"}
             },
             {
@@ -95,7 +99,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "arjun_free_play.mp4",
                 "fileSize": 52100000,
                 "uploaded": True,
-                "videoUrl": "/videos/arjun_free_play.mp4",
+                "videoUrl": get_mock_video_url("arjun_free_play.mp4"),
                 "qualityMetrics": {"framingQuality": 89, "lighting": "good", "resolution": "1080p"}
             },
             {
@@ -104,7 +108,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "arjun_joint_attention.mp4",
                 "fileSize": 48700000,
                 "uploaded": True,
-                "videoUrl": "/videos/arjun_joint_attention.mp4",
+                "videoUrl": get_mock_video_url("arjun_joint_attention.mp4"),
                 "qualityMetrics": {"framingQuality": 91, "lighting": "adequate", "resolution": "1080p"}
             }
         ]
@@ -129,7 +133,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "priya_social.mov",
                 "fileSize": 61300000,
                 "uploaded": True,
-                "videoUrl": "/videos/priya_social.mov",
+                "videoUrl": get_mock_video_url("priya_social.mov"),
                 "qualityMetrics": {"framingQuality": 86, "lighting": "adequate", "resolution": "1080p"}
             },
             {
@@ -138,7 +142,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "priya_play.mov",
                 "fileSize": 58400000,
                 "uploaded": True,
-                "videoUrl": "/videos/priya_play.mov",
+                "videoUrl": get_mock_video_url("priya_play.mov"),
                 "qualityMetrics": {"framingQuality": 90, "lighting": "good", "resolution": "1080p"}
             },
             {
@@ -147,7 +151,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "priya_attention.mov",
                 "fileSize": 54200000,
                 "uploaded": True,
-                "videoUrl": "/videos/priya_attention.mov",
+                "videoUrl": get_mock_video_url("priya_attention.mov"),
                 "qualityMetrics": {"framingQuality": 83, "lighting": "adequate", "resolution": "1080p"}
             }
         ]
@@ -172,7 +176,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "rohan_name_call.mp4",
                 "fileSize": 72400000,
                 "uploaded": True,
-                "videoUrl": "/videos/rohan_name_call.mp4",
+                "videoUrl": get_mock_video_url("rohan_name_call.mp4"),
                 "qualityMetrics": {"framingQuality": 95, "lighting": "good", "resolution": "1080p"}
             },
             {
@@ -181,7 +185,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "rohan_motor_stereotypies.mp4",
                 "fileSize": 68900000,
                 "uploaded": True,
-                "videoUrl": "/videos/rohan_motor_stereotypies.mp4",
+                "videoUrl": get_mock_video_url("rohan_motor_stereotypies.mp4"),
                 "qualityMetrics": {"framingQuality": 92, "lighting": "good", "resolution": "1080p"}
             },
             {
@@ -190,7 +194,7 @@ INITIAL_MOCK_PATIENTS: List[Dict[str, Any]] = [
                 "fileName": "rohan_joint_attention.mp4",
                 "fileSize": 70100000,
                 "uploaded": True,
-                "videoUrl": "/videos/rohan_joint_attention.mp4",
+                "videoUrl": get_mock_video_url("rohan_joint_attention.mp4"),
                 "qualityMetrics": {"framingQuality": 88, "lighting": "adequate", "resolution": "1080p"}
             }
         ]
@@ -204,16 +208,26 @@ fallback_patients_store: List[Dict[str, Any]] = [dict(p) for p in INITIAL_MOCK_P
 
 def upload_video_stream_to_storage(file_bytes: bytes, filename: str, content_type: str = "video/mp4") -> Dict[str, Any]:
     """
-    Streams video file bytes to Supabase Storage bucket ('screening-videos').
-    Returns public cloud URL or falls back to local video serving.
+    Streams video file bytes to Supabase Storage bucket ('videos').
+    Returns the absolute public Supabase URL for cloud streaming.
+    Removes local uploads/ disk fallback to ensure stateless cloud persistence.
     """
     file_ext = Path(filename).suffix or ".mp4"
     clean_name = Path(filename).stem.replace(" ", "_")
     storage_filename = f"{clean_name}_{uuid.uuid4().hex[:8]}{file_ext}"
+    storage_path = storage_filename
+
+    base_url = SUPABASE_URL.rstrip('/') if SUPABASE_URL else "https://your-project.supabase.co"
+    canonical_public_url = f"{base_url}/storage/v1/object/public/{STORAGE_BUCKET}/{storage_path}"
 
     if is_supabase_connected and supabase:
         try:
-            storage_path = f"screenings/{storage_filename}"
+            # Ensure the bucket exists and is marked as Public
+            try:
+                supabase.storage.create_bucket(STORAGE_BUCKET, options={"public": True})
+            except Exception:
+                pass  # Bucket already exists or permissions managed via dashboard
+
             # Upload to Supabase Storage bucket
             res = supabase.storage.from_(STORAGE_BUCKET).upload(
                 path=storage_path,
@@ -221,29 +235,40 @@ def upload_video_stream_to_storage(file_bytes: bytes, filename: str, content_typ
                 file_options={"content-type": content_type, "upsert": "true"}
             )
             # Retrieve public URL
-            public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(storage_path)
+            public_url_res = supabase.storage.from_(STORAGE_BUCKET).get_public_url(storage_path)
+            if isinstance(public_url_res, str) and public_url_res.startswith("http"):
+                public_url = public_url_res
+            elif isinstance(public_url_res, dict):
+                public_url = public_url_res.get("publicUrl") or public_url_res.get("publicURL") or canonical_public_url
+            else:
+                public_url = canonical_public_url
+
             logger.info(f"Uploaded video to Supabase Storage: {storage_path} -> {public_url}")
             return {
                 "success": True,
                 "cloud": True,
                 "filename": storage_filename,
                 "video_url": public_url,
-                "relative_url": f"/videos/{storage_filename}"
+                "relative_url": public_url
             }
         except Exception as e:
-            logger.error(f"Supabase storage upload failed: {e}. Falling back to local storage.")
+            logger.error(f"Supabase storage upload failed: {e}. Returning absolute cloud URL for storage.")
+            return {
+                "success": False,
+                "cloud": True,
+                "error": str(e),
+                "filename": storage_filename,
+                "video_url": canonical_public_url,
+                "relative_url": canonical_public_url
+            }
 
-    # Local fallback
-    local_path = LOCAL_UPLOADS_DIR / storage_filename
-    with open(local_path, "wb") as f:
-        f.write(file_bytes)
-    logger.info(f"Saved video locally: {local_path}")
+    logger.warning("Supabase client is not connected. Returning canonical Supabase cloud URL.")
     return {
-        "success": True,
-        "cloud": False,
+        "success": False,
+        "cloud": True,
         "filename": storage_filename,
-        "video_url": f"http://localhost:8000/videos/{storage_filename}",
-        "relative_url": f"/videos/{storage_filename}"
+        "video_url": canonical_public_url,
+        "relative_url": canonical_public_url
     }
 
 # ─── Video Record Insertion (Supabase PostgreSQL) ─────────────────────

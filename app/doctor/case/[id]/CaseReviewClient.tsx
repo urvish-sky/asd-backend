@@ -170,17 +170,37 @@ export default function CaseReviewClient({ id }: { id: string }) {
 
   const activeSlot = patient?.videoSlots?.find((v) => v.slotNumber === activeVideoSlot) || defaultSlot;
 
-  // Compute resolved video source with backend priority and frontend fallback
+  // Compute resolved video source with absolute cloud storage priority
   const resolvedVideoSrc = useMemo(() => {
-    if (activeSlot?.videoUrl) {
-      return activeSlot.videoUrl;
+    const rawUrl = activeSlot?.videoUrl;
+    if (rawUrl) {
+      // 1. If it's already an absolute cloud URL (Supabase Storage, S3, external HTTPS), stream it directly
+      if (rawUrl.startsWith('https://') || rawUrl.startsWith('http://')) {
+        // If an old record erroneously stored localhost:8000 in production, rewrite to backend API base
+        if (rawUrl.includes('localhost:8000')) {
+          const backendBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
+          if (backendBase && !backendBase.includes('localhost')) {
+            return rawUrl.replace(/http:\/\/localhost:8000/g, backendBase);
+          }
+        }
+        return rawUrl;
+      }
+      // 2. If it's a relative URL, resolve against backend API URL if configured
+      const backendBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
+      if (backendBase && !rawUrl.startsWith('http')) {
+        return `${backendBase}/${rawUrl.replace(/^\//, '')}`;
+      }
+      return rawUrl;
     }
+    // 3. If only fileName is present, check backend API endpoint
     if (activeSlot?.fileName) {
-      const backendBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-      return `${backendBase}/videos/${activeSlot.fileName}`;
+      const backendBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
+      if (backendBase) {
+        return `${backendBase}/videos/${activeSlot.fileName}`;
+      }
     }
-    return `/videos/protocol${activeVideoSlot}_social_engagement.mp4`;
-  }, [activeSlot, activeVideoSlot]);
+    return '';
+  }, [activeSlot]);
 
   const [videoSrcOverride, setVideoSrcOverride] = useState<string | null>(null);
   const [prevResolvedSrc, setPrevResolvedSrc] = useState(resolvedVideoSrc);
@@ -198,37 +218,30 @@ export default function CaseReviewClient({ id }: { id: string }) {
 
   const currentVideoSrc = videoSrcOverride ?? resolvedVideoSrc;
 
-  // Log the video URL to the console to verify if it is rendering as a local path or a backend API endpoint
+  // Log the video URL to the console to verify Supabase cloud storage streaming
   useEffect(() => {
+    const isSupabase = currentVideoSrc.includes('supabase.co');
     const isBackend = currentVideoSrc.includes(':8000') || currentVideoSrc.includes('/api/videos');
     const isBlob = currentVideoSrc.startsWith('blob:');
-    const isLocalPublic = currentVideoSrc.startsWith('/videos/') || currentVideoSrc.startsWith('/public/');
 
-    console.log('[Video Reviewer] Video source URL:', currentVideoSrc, {
+    console.log('[Video Reviewer] Video stream URL:', currentVideoSrc, {
       patientId,
       slot: activeVideoSlot,
       fileName: activeSlot?.fileName,
-      storageType: isBackend
-        ? 'FastAPI Backend Endpoint (http://localhost:8000/videos/...)'
+      storageType: isSupabase
+        ? 'Supabase Cloud Storage (Public Bucket)'
+        : isBackend
+        ? 'FastAPI Backend Endpoint'
         : isBlob
-        ? 'Browser Blob URL (blob:http...)'
-        : isLocalPublic
-        ? 'Next.js Local Public Static Path (/videos/...)'
-        : 'Remote External URL',
-      isBackendEndpoint: isBackend,
-      isLocalPath: isBlob || isLocalPublic,
+        ? 'Browser Blob URL'
+        : 'Remote HTTPS Cloud URL',
+      isAbsoluteCloudUrl: currentVideoSrc.startsWith('https://') || currentVideoSrc.startsWith('http://'),
     });
   }, [currentVideoSrc, patientId, activeVideoSlot, activeSlot]);
 
   const handleVideoError = () => {
     console.warn('[Video Reviewer] Playback failed for source:', currentVideoSrc);
-    if (currentVideoSrc.includes(':8000') && activeSlot?.fileName) {
-      const fallbackUrl = `/videos/${activeSlot.fileName}`;
-      console.log('[Video Reviewer] Attempting fallback to Next.js local static route:', fallbackUrl);
-      setVideoSrcOverride(fallbackUrl);
-    } else {
-      setVideoError('Unable to load video stream. Please verify that the backend server is running or check the video file.');
-    }
+    setVideoError('Unable to load video stream from cloud storage. Please verify that the Supabase storage bucket is public and the video has finished uploading.');
   };
 
   const togglePlay = () => {
@@ -691,14 +704,14 @@ export default function CaseReviewClient({ id }: { id: string }) {
                   <p className="text-xs text-white/90 font-medium mb-1">{videoError}</p>
                   <button
                     onClick={() => {
-                      if (activeSlot?.fileName) {
-                        setVideoSrcOverride(`/videos/${activeSlot.fileName}`);
-                        setVideoError(null);
+                      setVideoError(null);
+                      if (videoRef.current) {
+                        videoRef.current.load();
                       }
                     }}
                     className="mt-2 text-[11px] bg-teal-600 hover:bg-teal-700 text-white px-3 py-1 rounded font-medium transition-colors"
                   >
-                    Switch to Local Static Fallback
+                    Retry Video Stream
                   </button>
                 </div>
               )}
