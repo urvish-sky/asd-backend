@@ -1,1 +1,2 @@
-/ /parent 302
+# Netlify redirects file
+# The root route '/' serves the unified Landing Page (app/page.tsx)
