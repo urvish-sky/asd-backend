@@ -53,24 +53,28 @@ CREATE INDEX IF NOT EXISTS idx_screenings_status ON screenings(status);
 CREATE INDEX IF NOT EXISTS idx_videos_screening_id ON videos(screening_id);
 
 -- ─── 5. Supabase Storage Bucket Setup ────────────────────────────────
--- Insert the screening-videos public storage bucket if not already created
+-- Insert the public storage bucket for video recordings ('videos')
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('videos', 'videos', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('screening-videos', 'screening-videos', true)
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE SET public = true;
 
 -- Storage Policy: Allow public read access to videos
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_policies WHERE policyname = 'Public Access for Screening Videos'
+        SELECT 1 FROM pg_policies WHERE policyname = 'Public Access for Videos'
     ) THEN
-        CREATE POLICY "Public Access for Screening Videos"
+        CREATE POLICY "Public Access for Videos"
         ON storage.objects FOR SELECT
-        USING (bucket_id = 'screening-videos');
+        USING (bucket_id IN ('videos', 'screening-videos'));
     END IF;
 END $$;
 
--- Storage Policy: Allow service role / authenticated upload
+-- Storage Policy: Allow upload to videos
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -78,6 +82,6 @@ BEGIN
     ) THEN
         CREATE POLICY "Allow Video Uploads"
         ON storage.objects FOR INSERT
-        WITH CHECK (bucket_id = 'screening-videos');
+        WITH CHECK (bucket_id IN ('videos', 'screening-videos'));
     END IF;
 END $$;

@@ -19,6 +19,7 @@ import {
   Sparkles,
   Leaf,
   HeartHandshake,
+  AlertTriangle,
 } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import VideoUploadCard from '@/components/VideoUploadCard';
@@ -151,6 +152,11 @@ export default function ParentPortal() {
   const [registeredPatientId, setRegisteredPatientId] = useState<string | null>(null);
   const [screeningId, setScreeningId] = useState<string | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
+  const [registrationAlert, setRegistrationAlert] = useState<{
+    type: 'error' | 'warning' | 'info';
+    title: string;
+    message: string;
+  } | null>(null);
 
   // ─── Age Calculation Logic ───────────────────────────────────────
   const calculateMonths = (dob: string) => {
@@ -194,17 +200,25 @@ export default function ParentPortal() {
 
   const handleRegister = async () => {
     if (!validateForm()) return;
+    setRegistrationAlert(null);
     setIsRegistering(true);
 
     const ageInMonths = Math.max(0, calculateMonths(formData.dateOfBirth));
     let backendPatientId: string | null = null;
     let backendScreeningId: string | null = null;
 
+    // 30-second timeout safeguard to handle Render cold sleep or connection latency
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, 30000);
+
     try {
       const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
       const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           child_name: formData.childName,
           childName: formData.childName,
@@ -223,6 +237,8 @@ export default function ParentPortal() {
         }),
       });
 
+      clearTimeout(timeoutId);
+
       if (res.ok) {
         const data = await res.json();
         if (data.screening_id) {
@@ -232,10 +248,47 @@ export default function ParentPortal() {
         if (data.patient_id) {
           backendPatientId = data.patient_id;
         }
+      } else {
+        // Backend returned non-2xx status (e.g. 500 table missing or 400 validation error)
+        const errorData = await res.json().catch(() => ({ message: `HTTP ${res.status}: ${res.statusText}` }));
+        const errorMessage = errorData.message || errorData.detail || `Server returned error (${res.status})`;
+        console.warn('[Registration] Backend submit returned error:', errorData);
+
+        if (errorData.error_code === 'SUPABASE_TABLE_NOT_FOUND') {
+          setRegistrationAlert({
+            type: 'warning',
+            title: 'Supabase Database Setup Required',
+            message: 'Your Supabase database tables (patients, screenings, videos) have not been initialized. A local clinical session has been created so you can record videos immediately. Please run backend/schema.sql in your Supabase SQL Editor.',
+          });
+        } else {
+          setRegistrationAlert({
+            type: 'warning',
+            title: 'Cloud Registration Notice',
+            message: `${errorMessage}. A local screening session has been initialized so you can proceed without interruption.`,
+          });
+        }
       }
-    } catch (err) {
-      console.warn('Backend patient registration error (proceeding with local store):', err);
+    } catch (err: unknown) {
+      clearTimeout(timeoutId);
+      const isTimeout = err instanceof Error && err.name === 'AbortError';
+      console.warn('[Registration] Backend patient registration error:', err);
+
+      if (isTimeout) {
+        setRegistrationAlert({
+          type: 'warning',
+          title: 'Backend Server Waking Up (>30s)',
+          message: 'The cloud backend server took longer than 30 seconds to respond (Render free instances take ~30-50s to spin up from cold sleep). Your profile has been initialized in this local browser session so you can proceed with video recording immediately.',
+        });
+      } else {
+        const errMsg = err instanceof Error ? err.message : 'Could not reach backend server';
+        setRegistrationAlert({
+          type: 'warning',
+          title: 'Network / Offline Session Active',
+          message: `Could not connect to backend server (${errMsg}). Your profile has been created locally in this session so you can proceed to video recording.`,
+        });
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsRegistering(false);
     }
 
@@ -403,6 +456,33 @@ export default function ParentPortal() {
             <h2 className="text-lg font-bold text-slate-800 mb-1">Child Registration</h2>
             <p className="text-sm text-slate-500 mb-6">Please fill in your child&apos;s information to begin the screening process.</p>
 
+            {/* Registration Alert / Cloud Database Notice Banner */}
+            {registrationAlert && (
+              <div
+                className={`p-4 rounded-xl border flex items-start gap-3 mb-6 animate-fade-in ${
+                  registrationAlert.type === 'error'
+                    ? 'bg-rose-50 border-rose-200 text-rose-800'
+                    : registrationAlert.type === 'warning'
+                    ? 'bg-amber-50 border-amber-200 text-amber-800'
+                    : 'bg-blue-50 border-blue-200 text-blue-800'
+                }`}
+              >
+                <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                <div className="flex-1 text-xs">
+                  <p className="font-semibold text-sm mb-0.5">{registrationAlert.title}</p>
+                  <p className="leading-relaxed">{registrationAlert.message}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRegistrationAlert(null)}
+                  className="text-slate-400 hover:text-slate-600 text-xs font-semibold px-2 py-1"
+                  aria-label="Dismiss notice"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               {/* Child Name */}
               <div>
@@ -541,11 +621,14 @@ export default function ParentPortal() {
                     const dob = '2023-03-01';
                     const age = calculateMonths(dob);
                     let qpPatientId: string | null = null;
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
                     try {
                       const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
                       const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
+                        signal: controller.signal,
                         body: JSON.stringify({
                           child_name: 'Samir V.',
                           childName: 'Samir V.',
@@ -563,6 +646,7 @@ export default function ParentPortal() {
                           status: 'uploaded',
                         }),
                       });
+                      clearTimeout(timeoutId);
                       if (res.ok) {
                         const data = await res.json();
                         if (data.screening_id) {
@@ -573,6 +657,7 @@ export default function ParentPortal() {
                         }
                       }
                     } catch (e) {
+                      clearTimeout(timeoutId);
                       console.warn('Quick profile backend submit error:', e);
                     }
 

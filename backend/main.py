@@ -29,6 +29,7 @@ from db import (
     STORAGE_BUCKET,
     SUPABASE_URL,
     supabase,
+    check_or_initialize_supabase_tables,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -75,13 +76,34 @@ TEMP_DIR = Path("./temp_uploads")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 FEEDBACK_FILE = Path("./human_feedback.json")
 
-# Startup cleanup of temporary files
-for old_f in TEMP_DIR.glob("*"):
+@app.on_event("startup")
+async def startup_event():
+    """
+    FastAPI startup event:
+    1. Cleans up stale temp files in TEMP_DIR.
+    2. Verifies Supabase connection and checks required tables ('patients', 'screenings', 'videos').
+    3. Attempts direct PostgreSQL schema creation if DATABASE_URL is configured.
+    """
+    for old_f in TEMP_DIR.glob("*"):
+        try:
+            if old_f.is_file():
+                os.remove(old_f)
+        except Exception:
+            pass
+
+    logger.info("[Startup] Checking Supabase tables and storage readiness...")
     try:
-        if old_f.is_file():
-            os.remove(old_f)
-    except Exception:
-        pass
+        diagnostics = await run_in_threadpool(check_or_initialize_supabase_tables)
+        if diagnostics.get("all_tables_ready"):
+            logger.info("[Startup] All required Supabase tables (patients, screenings, videos) are initialized.")
+        else:
+            missing = diagnostics.get("missing_tables", [])
+            logger.warning(
+                f"[Startup] Supabase tables missing: {missing}. "
+                "Execute backend/schema.sql in Supabase SQL editor to create them."
+            )
+    except Exception as e:
+        logger.error(f"[Startup] Error during table verification: {e}")
 
 # ─── Human-in-the-Loop (HITL) Continuous Learning Storage ─────────────
 
@@ -199,7 +221,8 @@ def root():
             "analyze": "POST /api/analyze",
             "feedback": "POST /api/feedback",
             "list_feedback": "GET /api/feedback",
-            "health": "GET /api/health"
+            "health": "GET /api/health",
+            "db_status": "GET /api/db-status"
         }
     }
 
@@ -211,6 +234,26 @@ def health():
         "feedback_records_count": len(human_feedback),
         "attribution": ATTRIBUTION_TEXT
     }
+
+@app.get("/api/db-status")
+async def database_status():
+    """
+    Returns real-time diagnostics on Supabase PostgreSQL database tables and Storage bucket readiness.
+    """
+    diagnostics = await run_in_threadpool(check_or_initialize_supabase_tables)
+    is_ready = diagnostics.get("all_tables_ready", False)
+    return JSONResponse(
+        status_code=200 if is_ready else 207,
+        content={
+            "status": "ready" if is_ready else "tables_missing",
+            "diagnostics": diagnostics,
+            "instructions": (
+                "If tables are missing, copy and run backend/schema.sql in your Supabase SQL Editor: "
+                "https://supabase.com/dashboard/project/wtgllzeffkibxecgsbng/sql"
+            ) if not is_ready else "Database is fully initialized and operational.",
+            "attribution": ATTRIBUTION_TEXT
+        }
+    )
 
 # ─── Part 2: Human-in-the-Loop (HITL) Feedback Endpoint ───────────────
 
@@ -376,6 +419,27 @@ async def submit_patient_screening(payload: PatientSubmissionPayload):
             f"Screening registered successfully: patient_id={submission_result.get('patient_id')}, "
             f"screening_id={submission_result.get('screening_id')}, child_name={child_name}"
         )
+
+        if submission_result.get("table_missing"):
+            logger.warning(
+                f"[/api/submit] Supabase tables not initialized. Returning 500 JSON: {submission_result.get('supabase_error')}"
+            )
+            return JSONResponse(
+                status_code=500,
+                headers={
+                    "X-Attribution": ATTRIBUTION_TEXT,
+                    "Access-Control-Allow-Origin": "*"
+                },
+                content={
+                    "status": "error",
+                    "error_code": "SUPABASE_TABLE_NOT_FOUND",
+                    "message": "Required Supabase database tables ('patients' / 'screenings') are missing from the schema cache. Please execute backend/schema.sql in the Supabase SQL Editor.",
+                    "detail": submission_result.get("supabase_error"),
+                    "patient_id": submission_result.get("patient_id"),
+                    "screening_id": submission_result.get("screening_id"),
+                    "attribution": ATTRIBUTION_TEXT,
+                }
+            )
 
         return JSONResponse(
             status_code=201,

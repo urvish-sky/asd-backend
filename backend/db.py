@@ -42,6 +42,100 @@ if SUPABASE_URL and SUPABASE_KEY and not SUPABASE_URL.startswith("https://your-p
 else:
     logger.info("SUPABASE_URL or SUPABASE_KEY not set. Running in local fallback mode.")
 
+REQUIRED_TABLES = ["patients", "screenings", "videos"]
+DATABASE_URL = (os.getenv("DATABASE_URL", "") or os.getenv("SUPABASE_DB_URL", "")).strip()
+
+def initialize_postgres_direct() -> Dict[str, Any]:
+    """
+    If direct DATABASE_URL or SUPABASE_DB_URL is provided, executes DDL schema
+    to automatically create tables (patients, screenings, videos) if they do not exist.
+    """
+    if not DATABASE_URL:
+        return {"status": "skipped", "message": "No direct DATABASE_URL configured"}
+
+    schema_file = Path(__file__).parent / "schema.sql"
+    if not schema_file.exists():
+        return {"status": "error", "message": "schema.sql not found"}
+
+    try:
+        sql_content = schema_file.read_text(encoding="utf-8")
+        for driver in ["psycopg2", "psycopg", "asyncpg"]:
+            try:
+                if driver in ["psycopg2", "psycopg"]:
+                    pg = __import__(driver)
+                    conn = pg.connect(DATABASE_URL)
+                    cur = conn.cursor()
+                    cur.execute(sql_content)
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    logger.info(f"Successfully initialized PostgreSQL tables via {driver}.")
+                    return {"status": "success", "driver": driver}
+            except ImportError:
+                continue
+            except Exception as e:
+                logger.error(f"Failed to execute schema.sql via {driver}: {e}")
+                return {"status": "error", "error": str(e)}
+        return {"status": "skipped", "message": "No PostgreSQL direct driver installed"}
+    except Exception as e:
+        logger.error(f"Error initializing postgres directly: {e}")
+        return {"status": "error", "error": str(e)}
+
+def check_or_initialize_supabase_tables() -> Dict[str, Any]:
+    """
+    Verifies that required Supabase tables ('patients', 'screenings', 'videos') exist
+    and that the storage bucket ('videos') is initialized.
+    Returns structured diagnostics on table readiness and missing tables.
+    """
+    results = {
+        "supabase_connected": is_supabase_connected and (supabase is not None),
+        "tables": {},
+        "missing_tables": [],
+        "storage_bucket": {"name": STORAGE_BUCKET, "status": "unknown"},
+        "all_tables_ready": False,
+        "direct_pg": None,
+    }
+
+    if DATABASE_URL:
+        results["direct_pg"] = initialize_postgres_direct()
+
+    if not is_supabase_connected or not supabase:
+        results["all_tables_ready"] = False
+        results["message"] = "Supabase client is not connected; running in local fallback mode."
+        return results
+
+    # Ensure storage bucket exists and is public
+    try:
+        supabase.storage.create_bucket(STORAGE_BUCKET, options={"public": True})
+        results["storage_bucket"]["status"] = "created_or_verified"
+    except Exception:
+        results["storage_bucket"]["status"] = "ready_or_managed"
+
+    # Verify each required table
+    for table_name in REQUIRED_TABLES:
+        try:
+            supabase.table(table_name).select("id").limit(1).execute()
+            results["tables"][table_name] = {
+                "status": "ready",
+                "accessible": True,
+                "error": None
+            }
+        except Exception as t_err:
+            err_str = str(t_err)
+            results["tables"][table_name] = {
+                "status": "missing",
+                "accessible": False,
+                "error": err_str
+            }
+            results["missing_tables"].append(table_name)
+            logger.warning(
+                f"[Supabase DB] Table '{table_name}' is not ready: {err_str}. "
+                f"Please ensure schema.sql has been executed in Supabase SQL editor."
+            )
+
+    results["all_tables_ready"] = len(results["missing_tables"]) == 0
+    return results
+
 # Local uploads directory fallback
 LOCAL_UPLOADS_DIR = Path(__file__).parent / "uploads"
 LOCAL_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -488,6 +582,10 @@ def save_screening_submission(
     now_iso = datetime.now().isoformat()
     calculated_age = calculate_age_in_months(date_of_birth)
 
+    supabase_persisted = False
+    supabase_error = None
+    table_missing = False
+
     if is_supabase_connected and supabase:
         try:
             # 1. Upsert Patient
@@ -523,8 +621,12 @@ def save_screening_submission(
                     "analysis_result": telemetry
                 }).execute()
 
+            supabase_persisted = True
             logger.info(f"Successfully saved screening {actual_screening_id} for patient {actual_patient_id} to Supabase PostgreSQL.")
         except Exception as e:
+            supabase_error = str(e)
+            if "PGRST205" in supabase_error or "schema cache" in supabase_error or "does not exist" in supabase_error:
+                table_missing = True
             logger.error(f"Failed to persist screening to Supabase: {e}")
 
     # Also update in-memory fallback store
@@ -576,6 +678,9 @@ def save_screening_submission(
 
     return {
         "success": True,
+        "supabase_persisted": supabase_persisted,
+        "supabase_error": supabase_error,
+        "table_missing": table_missing,
         "patient_id": actual_patient_id,
         "screening_id": actual_screening_id,
         "age_in_months": calculated_age,
