@@ -566,7 +566,9 @@ async def upload_single_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     screening_id: Optional[str] = Form(None),
-    protocol_number: Optional[int] = Form(1),
+    screeningId: Optional[str] = Form(None),
+    protocol_number: Optional[int] = Form(None),
+    protocolNumber: Optional[int] = Form(None),
 ):
     """
     Dedicated video upload endpoint for clinical review.
@@ -589,11 +591,12 @@ async def upload_single_video(
         stored_filename = storage_result.get("filename", file.filename)
         # Absolute public Supabase URL (e.g. https://[ref].supabase.co/storage/v1/object/public/videos/filename.mp4)
         video_url = storage_result.get("video_url", "")
-        actual_screening_id = screening_id or f"SCR-UPLOAD-{uuid.uuid4().hex[:6]}"
+        actual_screening_id = screening_id or screeningId or f"SCR-UPLOAD-{uuid.uuid4().hex[:6]}"
+        actual_protocol = protocol_number or protocolNumber or 1
 
         logger.info(
             f"Video uploaded to Supabase Storage: {file.filename} -> "
-            f"{video_url} (cloud={storage_result.get('cloud', True)})"
+            f"{video_url} (cloud={storage_result.get('cloud', True)}, screening_id={actual_screening_id}, protocol={actual_protocol})"
         )
 
         # Cache a temporary local copy in TEMP_DIR strictly for MediaPipe CV analysis (deleted right after)
@@ -608,7 +611,7 @@ async def upload_single_video(
         video_record = await run_in_threadpool(
             insert_video_record,
             actual_screening_id,
-            protocol_number or 1,
+            actual_protocol,
             video_url,
             stored_filename,
         )

@@ -640,7 +640,7 @@ def save_screening_submission(
             if user_id:
                 screening_payload["user_id"] = user_id
 
-            supabase.table("screenings").insert(screening_payload).execute()
+            supabase.table("screenings").upsert(screening_payload).execute()
 
             # 3. Insert Videos
             for i, vid in enumerate(video_records, start=1):
