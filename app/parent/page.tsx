@@ -27,6 +27,7 @@ import ParwaaRecommendationCard from '@/components/ParwaaRecommendationCard';
 import { useAppStore } from '@/store/useAppStore';
 import { BiologicalSex, VideoSlot, VideoAnalysisResult, Patient } from '@/lib/types';
 import { mockPatients } from '@/lib/mockData';
+import { useAuth } from '@/context/AuthContext';
 
 // Baseline hardcoded mock data profiles (Arjun M., Priya K., Rohan S.)
 const mockData: Patient[] = mockPatients;
@@ -89,6 +90,7 @@ const STATUS_LABELS: Record<string, { label: string; className: string; icon: Re
 
 export default function ParentPortal() {
   const { patients, addPatient, updateSubmissionStatus, applyAIAnalysis } = useAppStore();
+  const { user, profile, accessToken } = useAuth();
   const [activeSection, setActiveSection] = useState<'register' | 'upload' | 'status'>('register');
 
   // Baseline hardcoded mock data (Arjun M., Priya K., Rohan S.) initialized into state
@@ -101,7 +103,10 @@ export default function ParentPortal() {
     async function fetchLiveSubmissions() {
       try {
         const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-        const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/inbox`);
+        const headers: Record<string, string> = {};
+        if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+        const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/inbox`, { headers });
         if (res.ok) {
           const data = await res.json();
           const fetchedLiveData: Patient[] = Array.isArray(data.patients)
@@ -127,7 +132,7 @@ export default function ParentPortal() {
     return () => {
       ignore = true;
     };
-  }, []);
+  }, [accessToken]);
 
   // Sync any newly registered patient from client store into records
   useEffect(() => {
@@ -144,10 +149,21 @@ export default function ParentPortal() {
     childName: '',
     dateOfBirth: '',
     biologicalSex: '' as BiologicalSex | '',
-    parentName: '',
-    contactEmail: '',
+    parentName: profile?.full_name || '',
+    contactEmail: profile?.email || '',
     contactPhone: '',
   });
+
+  // Auto-fill parent name and email when user profile resolves
+  useEffect(() => {
+    if (profile) {
+      setFormData((prev) => ({
+        ...prev,
+        parentName: prev.parentName || profile.full_name || '',
+        contactEmail: prev.contactEmail || profile.email || '',
+      }));
+    }
+  }, [profile]);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [registeredPatientId, setRegisteredPatientId] = useState<string | null>(null);
   const [screeningId, setScreeningId] = useState<string | null>(null);
@@ -215,9 +231,12 @@ export default function ParentPortal() {
 
     try {
       const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
       const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         signal: controller.signal,
         body: JSON.stringify({
           child_name: formData.childName,
@@ -625,9 +644,12 @@ export default function ParentPortal() {
                     const timeoutId = setTimeout(() => controller.abort(), 30000);
                     try {
                       const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
                       const res = await fetch(`${API_BASE_URL.replace(/\/+$/, '')}/api/submit`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers,
                         signal: controller.signal,
                         body: JSON.stringify({
                           child_name: 'Samir V.',

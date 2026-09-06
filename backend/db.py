@@ -42,7 +42,7 @@ if SUPABASE_URL and SUPABASE_KEY and not SUPABASE_URL.startswith("https://your-p
 else:
     logger.info("SUPABASE_URL or SUPABASE_KEY not set. Running in local fallback mode.")
 
-REQUIRED_TABLES = ["patients", "screenings", "videos"]
+REQUIRED_TABLES = ["profiles", "patients", "screenings", "videos"]
 DATABASE_URL = (os.getenv("DATABASE_URL", "") or os.getenv("SUPABASE_DB_URL", "")).strip()
 
 def initialize_postgres_direct() -> Dict[str, Any]:
@@ -464,19 +464,30 @@ def update_video_record_analysis(
 
 # ─── Database Operations (Supabase PostgreSQL) ────────────────────────
 
-def get_clinical_inbox_data() -> Dict[str, Any]:
+# ─── Database Operations (Supabase PostgreSQL) ────────────────────────
+
+def get_clinical_inbox_data(user_id: Optional[str] = None, user_role: Optional[str] = None) -> Dict[str, Any]:
     """
     Queries patient screenings ordered by submission_date DESC.
     Dynamically computes age in months from date_of_birth.
+    Enforces RBAC data isolation:
+      - If user_role == 'parent', strictly filters to screenings owned by user_id.
+      - If user_role in ['doctor', 'admin'], returns all clinical cases.
     """
+    is_parent = user_role == "parent"
+
     if is_supabase_connected and supabase:
         try:
-            # Query screenings joined with patient data
-            screenings_res = supabase.table("screenings").select(
-                "id, patient_id, submission_date, risk_tier, status, clinical_notes, isaa_scores, biomarkers, patients(id, name, date_of_birth, biological_sex, parent_name, contact_email, contact_phone), videos(id, protocol_number, cloud_storage_url, file_name, analysis_result)"
-            ).order("submission_date", desc=True).execute()
+            # Query screenings joined with patient and video data
+            query = supabase.table("screenings").select(
+                "id, patient_id, user_id, submission_date, risk_tier, status, clinical_notes, isaa_scores, biomarkers, patients(id, user_id, name, date_of_birth, biological_sex, parent_name, contact_email, contact_phone), videos(id, protocol_number, cloud_storage_url, file_name, analysis_result)"
+            )
+            if is_parent and user_id:
+                query = query.eq("user_id", user_id)
 
-            if screenings_res.data:
+            screenings_res = query.order("submission_date", desc=True).execute()
+
+            if screenings_res.data is not None:
                 inbox_patients = []
                 for s in screenings_res.data:
                     p = s.get("patients") or {}
@@ -510,6 +521,8 @@ def get_clinical_inbox_data() -> Dict[str, Any]:
 
                     inbox_patients.append({
                         "id": p.get("id") or s.get("patient_id"),
+                        "screening_id": s.get("id"),
+                        "user_id": s.get("user_id") or p.get("user_id"),
                         "childName": p.get("name") or "Child Patient",
                         "dateOfBirth": dob,
                         "ageInMonths": age_mo,
@@ -538,19 +551,28 @@ def get_clinical_inbox_data() -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Error fetching from Supabase: {e}. Returning fallback data.")
 
+    # Fallback store handling with RBAC filtering
+    records = fallback_patients_store
+    if is_parent and user_id:
+        # Parents only see their own submissions in fallback mode
+        records = [p for p in fallback_patients_store if p.get("user_id") == user_id]
+        # If user has no submissions yet, do not leak other mock patient data to parents
+        if not records:
+            records = []
+
     # Recalculate age for fallback store dynamically
-    for p in fallback_patients_store:
+    for p in records:
         p["ageInMonths"] = calculate_age_in_months(p.get("dateOfBirth"))
 
     return {
         "source": "fallback_store",
-        "total": len(fallback_patients_store),
-        "patients": fallback_patients_store,
+        "total": len(records),
+        "patients": records,
         "stats": {
-            "totalPatients": len(fallback_patients_store),
-            "pendingReview": sum(1 for p in fallback_patients_store if p.get("clinicalStatus") == "pending"),
-            "elevatedRisk": sum(1 for p in fallback_patients_store if p.get("riskTier") == "elevated"),
-            "reviewed": sum(1 for p in fallback_patients_store if p.get("clinicalStatus") == "reviewed")
+            "totalPatients": len(records),
+            "pendingReview": sum(1 for p in records if p.get("clinicalStatus") == "pending"),
+            "elevatedRisk": sum(1 for p in records if p.get("riskTier") == "elevated"),
+            "reviewed": sum(1 for p in records if p.get("clinicalStatus") == "reviewed")
         }
     }
 
@@ -569,9 +591,11 @@ def save_screening_submission(
     isaa_flags: Optional[Dict[str, Any]] = None,
     patient_id: Optional[str] = None,
     screening_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Persists patient, screening, and video records into Supabase PostgreSQL (or fallback store).
+    Associates the records with user_id for strict RBAC ownership.
     """
     video_records = video_records or []
     telemetry = telemetry or {}
@@ -588,8 +612,8 @@ def save_screening_submission(
 
     if is_supabase_connected and supabase:
         try:
-            # 1. Upsert Patient
-            supabase.table("patients").upsert({
+            # 1. Upsert Patient with optional user_id
+            patient_payload: Dict[str, Any] = {
                 "id": actual_patient_id,
                 "name": child_name,
                 "date_of_birth": date_of_birth or date.today().isoformat(),
@@ -597,10 +621,14 @@ def save_screening_submission(
                 "parent_name": parent_name,
                 "contact_email": contact_email,
                 "contact_phone": contact_phone,
-            }).execute()
+            }
+            if user_id:
+                patient_payload["user_id"] = user_id
 
-            # 2. Insert Screening
-            supabase.table("screenings").insert({
+            supabase.table("patients").upsert(patient_payload).execute()
+
+            # 2. Insert Screening with user_id
+            screening_payload: Dict[str, Any] = {
                 "id": actual_screening_id,
                 "patient_id": actual_patient_id,
                 "submission_date": now_iso,
@@ -608,7 +636,11 @@ def save_screening_submission(
                 "status": status,
                 "biomarkers": telemetry,
                 "isaa_scores": {"flags": isaa_flags}
-            }).execute()
+            }
+            if user_id:
+                screening_payload["user_id"] = user_id
+
+            supabase.table("screenings").insert(screening_payload).execute()
 
             # 3. Insert Videos
             for i, vid in enumerate(video_records, start=1):
@@ -622,7 +654,7 @@ def save_screening_submission(
                 }).execute()
 
             supabase_persisted = True
-            logger.info(f"Successfully saved screening {actual_screening_id} for patient {actual_patient_id} to Supabase PostgreSQL.")
+            logger.info(f"Successfully saved screening {actual_screening_id} for patient {actual_patient_id} (user_id={user_id}) to Supabase PostgreSQL.")
         except Exception as e:
             supabase_error = str(e)
             if "PGRST205" in supabase_error or "schema cache" in supabase_error or "does not exist" in supabase_error:
@@ -646,6 +678,7 @@ def save_screening_submission(
     new_patient_record = {
         "id": actual_patient_id,
         "screening_id": actual_screening_id,
+        "user_id": user_id,
         "childName": child_name,
         "dateOfBirth": date_of_birth or date.today().isoformat(),
         "ageInMonths": calculated_age,
@@ -667,7 +700,6 @@ def save_screening_submission(
         None
     )
     if existing_idx is not None:
-        # Preserve any existing uploaded video slots
         existing_slots = fallback_patients_store[existing_idx].get("videoSlots", [])
         for i, s in enumerate(new_patient_record["videoSlots"]):
             if i < len(existing_slots) and existing_slots[i].get("uploaded") and not s.get("uploaded"):
@@ -683,7 +715,119 @@ def save_screening_submission(
         "table_missing": table_missing,
         "patient_id": actual_patient_id,
         "screening_id": actual_screening_id,
+        "user_id": user_id,
         "age_in_months": calculated_age,
         "risk_tier": risk_tier,
         "status": status
+    }
+
+
+# ─── Admin Management Operations ──────────────────────────────────────
+
+# In-memory mock profiles for fallback when Supabase is running locally
+FALLBACK_PROFILES = [
+    {"id": "00000000-0000-0000-0000-000000000001", "full_name": "Dr. Aarushi Gupta", "email": "doctor@aiims.edu", "role": "doctor", "created_at": "2026-08-01T09:00:00Z"},
+    {"id": "00000000-0000-0000-0000-000000000002", "full_name": "Prof. Shyam Kamal", "email": "admin@iitbhu.ac.in", "role": "admin", "created_at": "2026-08-01T08:30:00Z"},
+    {"id": "00000000-0000-0000-0000-000000000003", "full_name": "Kavita Mehta", "email": "kavita.mehta@example.com", "role": "parent", "created_at": "2026-08-28T10:00:00Z"},
+]
+
+def list_all_users() -> List[Dict[str, Any]]:
+    """
+    Returns list of all user profiles from Supabase PostgreSQL (or fallback store).
+    Only accessible by Admin.
+    """
+    if is_supabase_connected and supabase:
+        try:
+            res = supabase.table("profiles").select("id, full_name, email, role, created_at, updated_at").order("created_at", desc=True).execute()
+            if res.data:
+                return res.data
+        except Exception as e:
+            logger.warning(f"Failed to fetch profiles from Supabase: {e}")
+    return FALLBACK_PROFILES
+
+def update_user_role(user_id: str, new_role: str) -> Dict[str, Any]:
+    """
+    Updates the role ('parent', 'doctor', 'admin') for a user in the profiles table.
+    """
+    if new_role not in ["parent", "doctor", "admin"]:
+        raise ValueError(f"Invalid role '{new_role}'. Must be one of 'parent', 'doctor', 'admin'.")
+
+    updated_in_cloud = False
+    if is_supabase_connected and supabase:
+        try:
+            res = supabase.table("profiles").update({"role": new_role, "updated_at": datetime.now().isoformat()}).eq("id", user_id).execute()
+            if res.data:
+                updated_in_cloud = True
+        except Exception as e:
+            logger.error(f"Failed to update role in Supabase: {e}")
+
+    # Update in fallback profiles
+    for p in FALLBACK_PROFILES:
+        if p["id"] == user_id:
+            p["role"] = new_role
+            break
+
+    return {
+        "user_id": user_id,
+        "new_role": new_role,
+        "updated_in_cloud": updated_in_cloud,
+        "status": "success"
+    }
+
+def get_admin_system_stats() -> Dict[str, Any]:
+    """
+    Gathers system health, database readiness, total screenings, and user role distribution.
+    """
+    diagnostics = check_or_initialize_supabase_tables()
+    users = list_all_users()
+    inbox = get_clinical_inbox_data()
+    patients = inbox.get("patients", [])
+
+    role_counts = {"parent": 0, "doctor": 0, "admin": 0}
+    for u in users:
+        r = u.get("role", "parent")
+        if r in role_counts:
+            role_counts[r] += 1
+        else:
+            role_counts[r] = 1
+
+    risk_counts = {"typical": 0, "moderate": 0, "elevated": 0}
+    for p in patients:
+        tier = (p.get("riskTier") or "typical").lower()
+        if tier in risk_counts:
+            risk_counts[tier] += 1
+
+    return {
+        "database": diagnostics,
+        "total_screenings": len(patients),
+        "total_users": len(users),
+        "users_by_role": role_counts,
+        "screenings_by_risk": risk_counts,
+        "storage_bucket": STORAGE_BUCKET,
+        "timestamp": datetime.now().isoformat()
+    }
+
+def delete_screening_record(screening_id: str) -> Dict[str, Any]:
+    """
+    Deletes a screening record (and cascaded videos) from Supabase and fallback store.
+    """
+    deleted_in_cloud = False
+    if is_supabase_connected and supabase:
+        try:
+            supabase.table("screenings").delete().eq("id", screening_id).execute()
+            deleted_in_cloud = True
+        except Exception as e:
+            logger.error(f"Failed to delete screening from Supabase: {e}")
+
+    # Remove from fallback store
+    global fallback_patients_store
+    fallback_patients_store = [
+        p for p in fallback_patients_store
+        if p.get("screening_id") != screening_id and p.get("id") != screening_id
+    ]
+
+    return {
+        "screening_id": screening_id,
+        "deleted_in_cloud": deleted_in_cloud,
+        "status": "success"
     }

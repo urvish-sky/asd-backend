@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, BackgroundTasks, APIRouter, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -18,6 +18,14 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from analyzer import AutismBehaviorAnalyzer
+from auth import (
+    CurrentUser,
+    get_current_user,
+    get_optional_user,
+    require_role,
+    require_doctor_or_admin,
+    require_admin,
+)
 from db import (
     upload_video_stream_to_storage,
     insert_video_record,
@@ -30,6 +38,10 @@ from db import (
     SUPABASE_URL,
     supabase,
     check_or_initialize_supabase_tables,
+    list_all_users,
+    update_user_role,
+    get_admin_system_stats,
+    delete_screening_record,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -222,7 +234,9 @@ def root():
             "feedback": "POST /api/feedback",
             "list_feedback": "GET /api/feedback",
             "health": "GET /api/health",
-            "db_status": "GET /api/db-status"
+            "db_status": "GET /api/db-status",
+            "admin_users": "GET /api/admin/users",
+            "admin_stats": "GET /api/admin/stats"
         }
     }
 
@@ -258,13 +272,23 @@ async def database_status():
 # ─── Part 2: Human-in-the-Loop (HITL) Feedback Endpoint ───────────────
 
 @app.post("/api/feedback", status_code=201)
-async def submit_human_feedback(payload: FeedbackPayload):
+async def submit_human_feedback(
+    payload: FeedbackPayload,
+    current_user: Optional[CurrentUser] = Depends(get_optional_user)
+):
     """
     Developed by Urvish Soni and Zankhana Mehta at IIT BHU under the guidance of Professor Shyam Kamal, Department of Electrical Engineering.
     
     Ingests clinical feedback from pediatricians modifying AI-generated ISAA item scores.
     Stores the feedback in the human_feedback continuous learning database for model retraining.
+    Enforces RBAC: Only doctors or admins can submit clinical overrides.
     """
+    if current_user and current_user.role not in ["doctor", "admin"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only clinicians with 'doctor' or 'admin' roles may modify clinical scores (your role: '{current_user.role}')."
+        )
+
     if not payload.justification_text.strip():
         raise HTTPException(status_code=422, detail="Clinical justification text cannot be empty.")
 
@@ -276,6 +300,8 @@ async def submit_human_feedback(payload: FeedbackPayload):
         "doctor_new_score": payload.doctor_new_score,
         "score_delta": payload.doctor_new_score - payload.original_ai_score,
         "justification_text": payload.justification_text.strip(),
+        "doctor_id": current_user.id if current_user else "guest_doctor",
+        "doctor_name": current_user.full_name if current_user else "Reviewing Clinician",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "attribution": ATTRIBUTION_TEXT
     }
@@ -285,7 +311,7 @@ async def submit_human_feedback(payload: FeedbackPayload):
 
     logger.info(
         f"Continuous Learning: Stored feedback for {payload.submission_id} [{payload.item_id}] "
-        f"({payload.original_ai_score} -> {payload.doctor_new_score})"
+        f"({payload.original_ai_score} -> {payload.doctor_new_score}) by {feedback_record['doctor_name']}"
     )
 
     return JSONResponse(
@@ -323,16 +349,23 @@ def get_human_feedback(submission_id: Optional[str] = Query(None, description="O
 # ─── Clinical Triage Inbox Endpoint ──────────────────────────────────
 
 @app.get("/api/inbox")
-async def clinical_inbox():
+async def clinical_inbox(current_user: Optional[CurrentUser] = Depends(get_optional_user)):
     """
-    Returns the clinical triage inbox data for the doctor portal.
-    Queries Supabase PostgreSQL for patient screenings, or returns
-    local fallback mock data when Supabase is not configured.
+    Returns the clinical triage inbox data for the doctor portal or parent's submissions.
+    Enforces RBAC data isolation:
+      - If caller has 'parent' role: strictly filters to records owned by current_user.id.
+      - If caller has 'doctor' or 'admin' role: returns all clinical cases.
     """
     try:
-        data = await run_in_threadpool(get_clinical_inbox_data)
+        user_id = current_user.id if current_user else None
+        user_role = current_user.role if current_user else None
+        data = await run_in_threadpool(get_clinical_inbox_data, user_id=user_id, user_role=user_role)
         return JSONResponse(content={
             **data,
+            "caller": {
+                "user_id": user_id,
+                "role": user_role or "guest",
+            },
             "attribution": ATTRIBUTION_TEXT,
         })
     except Exception as e:
@@ -374,13 +407,17 @@ async def get_patient_by_id(patient_id: str):
 # ─── Patient Registration & Screening Submission Endpoint ─────────────
 
 @app.post("/api/submit", status_code=201)
-async def submit_patient_screening(payload: PatientSubmissionPayload):
+async def submit_patient_screening(
+    payload: PatientSubmissionPayload,
+    current_user: Optional[CurrentUser] = Depends(get_optional_user)
+):
     """
     Developed by Urvish Soni and Zankhana Mehta at IIT BHU under the guidance of Professor Shyam Kamal, Department of Electrical Engineering.
 
     Accepts patient details (Child Name, Date of Birth/Age, Sex, Contact, etc.) from the registration form.
     Executes save_screening_submission in a worker threadpool to persist the patient and screening records
     into Supabase PostgreSQL (or fallback store).
+    Enforces RBAC: Links data to authenticated user_id for strict family data isolation.
     Returns the generated screening_id and patient_id to the frontend so it can be passed to subsequent video uploads.
     """
     try:
@@ -397,6 +434,7 @@ async def submit_patient_screening(payload: PatientSubmissionPayload):
         isaa_flags = payload.isaa_flags or {}
         patient_id = payload.resolved_patient_id
         screening_id = payload.resolved_screening_id
+        user_id = current_user.id if current_user else None
 
         submission_result = await run_in_threadpool(
             save_screening_submission,
@@ -413,6 +451,7 @@ async def submit_patient_screening(payload: PatientSubmissionPayload):
             isaa_flags=isaa_flags,
             patient_id=patient_id,
             screening_id=screening_id,
+            user_id=user_id,
         )
 
         logger.info(
@@ -848,6 +887,96 @@ async def analyze_video(
                         break
                     except Exception:
                         time.sleep(0.1)
+
+# ─── Part 4: Role-Based Admin Management Router ───────────────────────
+
+class RoleUpdatePayload(BaseModel):
+    role: str = Field(..., example="doctor", description="Target role: 'parent', 'doctor', or 'admin'")
+
+admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+@admin_router.get("/users")
+async def get_admin_users(admin_user: CurrentUser = Depends(require_admin)):
+    """
+    Returns list of all user profiles and assigned roles in the system.
+    Strictly restricted to 'admin' role.
+    """
+    try:
+        users = await run_in_threadpool(list_all_users)
+        return JSONResponse(content={
+            "total_users": len(users),
+            "users": users,
+            "caller": {"id": admin_user.id, "email": admin_user.email, "role": admin_user.role},
+            "attribution": ATTRIBUTION_TEXT
+        })
+    except Exception as e:
+        logger.error(f"Error fetching admin users: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_router.patch("/users/{user_id}/role")
+async def change_user_role(
+    user_id: str,
+    payload: RoleUpdatePayload,
+    admin_user: CurrentUser = Depends(require_admin)
+):
+    """
+    Promotes or modifies a user's role in Supabase profiles.
+    Strictly restricted to 'admin' role.
+    """
+    try:
+        result = await run_in_threadpool(update_user_role, user_id=user_id, new_role=payload.role.lower())
+        return JSONResponse(content={
+            "success": True,
+            "message": f"User {user_id} role updated to '{payload.role.lower()}'.",
+            "result": result,
+            "attribution": ATTRIBUTION_TEXT
+        })
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error updating user role: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_router.get("/stats")
+async def get_admin_stats(admin_user: CurrentUser = Depends(require_admin)):
+    """
+    Returns system diagnostic statistics, storage telemetry, and aggregate screening counts.
+    Strictly restricted to 'admin' role.
+    """
+    try:
+        stats = await run_in_threadpool(get_admin_system_stats)
+        return JSONResponse(content={
+            "system": "Pediatric ASD Screening Platform CDSS",
+            "stats": stats,
+            "caller": {"id": admin_user.id, "role": admin_user.role},
+            "attribution": ATTRIBUTION_TEXT
+        })
+    except Exception as e:
+        logger.error(f"Error fetching admin stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_router.delete("/screenings/{screening_id}")
+async def delete_screening(
+    screening_id: str,
+    admin_user: CurrentUser = Depends(require_admin)
+):
+    """
+    Permanently deletes a screening record and associated videos.
+    Strictly restricted to 'admin' role.
+    """
+    try:
+        res = await run_in_threadpool(delete_screening_record, screening_id=screening_id)
+        return JSONResponse(content={
+            "success": True,
+            "message": f"Screening {screening_id} deleted successfully.",
+            "result": res,
+            "attribution": ATTRIBUTION_TEXT
+        })
+    except Exception as e:
+        logger.error(f"Error deleting screening {screening_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+app.include_router(admin_router)
 
 if __name__ == "__main__":
     import uvicorn

@@ -19,6 +19,7 @@ import {
 import { useAppStore } from '@/store/useAppStore';
 import { Patient, RiskTier, ClinicalStatus } from '@/lib/types';
 import { mockPatients } from '@/lib/mockData';
+import { useAuth } from '@/context/AuthContext';
 
 // Hardcoded baseline mock data profiles (Arjun M., Priya K., Rohan S.)
 const mockData: Patient[] = mockPatients;
@@ -99,6 +100,7 @@ function getClinicalStatusBadge(status?: string): { label: string; className: st
 
 export default function DoctorPortal() {
   const { setPatients } = useAppStore();
+  const { role, accessToken } = useAuth();
   const router = useRouter();
 
   // Baseline hardcoded mock data (Arjun M., Priya K., Rohan S.) initialized into state
@@ -120,7 +122,10 @@ export default function DoctorPortal() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`${API_BASE_URL}/api/inbox`);
+        const headers: Record<string, string> = {};
+        if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+        const res = await fetch(`${API_BASE_URL}/api/inbox`, { headers });
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         }
@@ -160,7 +165,7 @@ export default function DoctorPortal() {
     return () => {
       ignore = true;
     };
-  }, [API_BASE_URL, setPatients]);
+  }, [accessToken, API_BASE_URL, setPatients]);
 
   const handleRefresh = useCallback(async () => {
     setLoading(true);
